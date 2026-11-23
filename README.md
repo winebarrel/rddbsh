@@ -89,7 +89,7 @@ Releases are built by [dist](https://opensource.axo.dev/cargo-dist/) (`.github/w
 git tag v0.12.1 && git push origin v0.12.1
 ```
 
-The workflow uploads archives (macOS Apple Silicon, Linux, Windows) with checksums to GitHub Releases, then pushes the Homebrew formula to [winebarrel/homebrew-rddbsh](https://github.com/winebarrel/homebrew-rddbsh) using the `HOMEBREW_TAP_TOKEN` secret (a fine-grained token with Contents: Read and write on that repository).
+The workflow uploads archives (macOS Apple Silicon, Linux, Windows) with checksums to GitHub Releases and updates the Homebrew formula.
 
 ## License
 
