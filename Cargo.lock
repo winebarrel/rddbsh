@@ -1308,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "rddbsh"
-version = "0.12.1"
+version = "0.12.1+1"
 dependencies = [
  "aws-config",
  "aws-credential-types",
