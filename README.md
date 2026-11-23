@@ -39,7 +39,7 @@ Interactive input follows the isql model: lines are buffered until a line contai
 
 ```
 $ rddbsh
-ddbsh - version 0.12.1+2
+ddbsh - version x.y.z
 us-east-1> create table movies (title string, year number) primary key (title hash, year range);
 us-east-1> insert into movies (title, year, rating) values ("Up", 2009, 8.3);
 us-east-1> select * from movies where title = "Up";
@@ -86,7 +86,7 @@ The suite targets real DynamoDB (it creates and drops tables). Use `--endpoint` 
 Releases are built by [dist](https://opensource.axo.dev/cargo-dist/) (`.github/workflows/release.yml`). Bump `version` in `Cargo.toml`, then push a matching tag:
 
 ```sh
-git tag v0.12.1+2 && git push origin v0.12.1+2
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
 The workflow uploads archives (macOS Apple Silicon, Linux, Windows) with checksums to GitHub Releases and updates the Homebrew formula.
