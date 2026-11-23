@@ -6,7 +6,7 @@ A Rust port of [ddbsh](https://github.com/awslabs/dynamodb-shell), a SQL-like in
 > rddbsh runs directly against your DynamoDB tables. `delete`, `drop`, `update`, scans and queries are real operations that consume capacity and may incur costs.
 
 > [!TIP]
-> Tired of typing `go`? Start with **`rddbsh --immediate`** and each statement runs as soon as you type `;`. See [Immediate mode](#immediate-mode---immediate).
+> With `--immediate`, statements run when a line ends with `;`, without `go`. See [Immediate mode](#immediate-mode---immediate).
 
 ## Install
 
