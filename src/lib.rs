@@ -13,6 +13,7 @@
 
 pub mod cli;
 pub mod client;
+pub mod completion;
 pub mod error;
 pub mod execute;
 pub mod expressions;

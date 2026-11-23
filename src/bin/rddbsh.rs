@@ -8,11 +8,21 @@
 //! line editing + history, isql-style input assembly, config-file loading,
 //! signal handling, and wiring the wire client into the engine.
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Write};
+use std::time::{Duration, Instant};
+
+use rustyline::completion::{Completer, Pair};
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::Validator;
+use rustyline::{Context, Editor, Helper};
 
 use rddbsh::cli::{resolve_ca_bundle, run_source, LineSource, StreamLineSource, Terminator};
-use rddbsh::client::DdbClient;
+use rddbsh::client::{DdbClient, ListTablesIn};
+use rddbsh::completion;
 use rddbsh::render::Renderer;
 use rddbsh::session::{ConnectionHint, Session, SessionConfig};
 
@@ -173,10 +183,84 @@ fn os_message(e: &std::io::Error) -> String {
     }
 }
 
+/// How long listed table names are reused for completion.
+const TABLE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Tab completion: keywords, plus table names where a table is expected.
+/// Table names come from ListTables on a client of its own (the session's
+/// client is busy running the REPL), cached per region/endpoint.
+struct CompletionHelper {
+    region: String,
+    endpoint: String,
+    ca_bundle: Option<String>,
+    state: RefCell<TableCache>,
+}
+
+#[derive(Default)]
+struct TableCache {
+    client: Option<((String, String), Box<dyn DdbClient>)>,
+    tables: Option<((String, String), Instant, Vec<String>)>,
+}
+
+impl CompletionHelper {
+    fn table_names(&self) -> Vec<String> {
+        let key = (self.region.clone(), self.endpoint.clone());
+        let mut st = self.state.borrow_mut();
+        if let Some((k, at, names)) = &st.tables {
+            if *k == key && at.elapsed() < TABLE_CACHE_TTL {
+                return names.clone();
+            }
+        }
+        if st.client.as_ref().is_none_or(|(k, _)| *k != key) {
+            match open_client(&self.region, &self.endpoint, self.ca_bundle.clone()) {
+                Ok(c) => st.client = Some((key.clone(), c)),
+                Err(_) => return Vec::new(),
+            }
+        }
+        let Some((_, client)) = st.client.as_mut() else {
+            return Vec::new();
+        };
+        let names = client
+            .list_tables(&ListTablesIn::default())
+            .map(|o| o.table_names)
+            .unwrap_or_default();
+        st.tables = Some((key, Instant::now(), names.clone()));
+        names
+    }
+}
+
+impl Completer for CompletionHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let (start, words) = completion::complete(line, pos, || self.table_names());
+        let pairs = words
+            .into_iter()
+            .map(|w| Pair {
+                display: w.clone(),
+                replacement: w,
+            })
+            .collect();
+        Ok((start, pairs))
+    }
+}
+
+impl Hinter for CompletionHelper {
+    type Hint = String;
+}
+impl Highlighter for CompletionHelper {}
+impl Validator for CompletionHelper {}
+impl Helper for CompletionHelper {}
+
 /// Interactive stdin with line editing + history; the prompt is rebuilt from
 /// the session's live connection hint before each read.
 struct StdinLineSource {
-    editor: rustyline::DefaultEditor,
+    editor: Editor<CompletionHelper, DefaultHistory>,
     prompt: String,
 }
 
@@ -187,6 +271,10 @@ impl LineSource for StdinLineSource {
             hint.region,
             if hint.endpoint_overridden { " (*)" } else { "" }
         );
+        if let Some(h) = self.editor.helper_mut() {
+            h.region = hint.region.clone();
+            h.endpoint = hint.endpoint.clone();
+        }
     }
 
     fn next_line(&mut self) -> Option<String> {
@@ -257,6 +345,7 @@ fn real_main() -> i32 {
         profile_ca.as_deref(),
     );
 
+    let completion_ca_bundle = ca_bundle.clone();
     let client = match open_client(&region, &endpoint, ca_bundle) {
         Ok(c) => c,
         Err(msg) => {
@@ -323,13 +412,19 @@ fn real_main() -> i32 {
     }
 
     // Interactive REPL.
-    let mut editor = match rustyline::DefaultEditor::new() {
+    let mut editor = match Editor::<CompletionHelper, DefaultHistory>::new() {
         Ok(e) => e,
         Err(e) => {
             eprintln!("{}", e);
             return 1;
         }
     };
+    editor.set_helper(Some(CompletionHelper {
+        region: region.clone(),
+        endpoint: endpoint.clone(),
+        ca_bundle: completion_ca_bundle,
+        state: RefCell::new(TableCache::default()),
+    }));
     let history = history_path();
     if let Some(h) = &history {
         let _ = editor.load_history(h);

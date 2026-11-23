@@ -73,6 +73,10 @@ us-east-1>   from movies;
 - A `go` line still works.
 - To switch modes inside the shell, use `set immediate on` or `set immediate off`. To make immediate mode the default, put `set immediate on` in `~/.ddbsh_config`.
 
+### Tab completion
+
+Press <kbd>Tab</kbd> to complete keywords and table names. Table names are offered after `from`, `into`, `update`, `describe`, `table` and similar keywords. They come from `ListTables` and are cached for 30 seconds.
+
 Credentials and region come from the standard AWS chain (environment, profiles, SSO, IMDS).
 
 | Environment variable | Description |
