@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! Tokenizer (port of src/parser/lexer.l).
 //!
 //! Reproduces flex's longest-match / earliest-rule semantics over the original

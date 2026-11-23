@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! Response parsing into the client-seam `*Out` structs (port of wire/parse.cpp).
 
 use super::datetime::epoch_to_iso8601;

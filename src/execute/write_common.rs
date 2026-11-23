@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! Helpers shared by the write executors (port of execute/write_common.hpp).
 
 use crate::client::*;

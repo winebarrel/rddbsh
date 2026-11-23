@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! Verbatim HELP usage strings (port of src/parser/help_text.cpp).
 //! Do NOT reflow: leading spaces and blank lines are observable output.
 

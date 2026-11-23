@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! `WireClient`: the `DdbClient` implemented over a JSON `Transport`, with
 //! transient-error retries and the table-state waiters (port of wire/wire_client.cpp).
 

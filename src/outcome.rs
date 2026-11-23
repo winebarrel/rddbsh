@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! Typed execution outcomes (port of include/ddbsh/exec_outcome.hpp + outcome_sink.hpp).
 
 use crate::client::{ConsumedCapacity, ItemRow, VectorConsumedCapacity};

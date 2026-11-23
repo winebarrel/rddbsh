@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! Recursive-descent parser (port of src/parser/grammar.yy + driver.cpp).
 //!
 //! Accepts exactly the bison grammar's language. One statement is parsed per

@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! The SDK-free DynamoDB client seam (port of include/ddbsh/iddbclient.hpp).
 //! Executors talk only to `DdbClient`; the wire client implements it.
 

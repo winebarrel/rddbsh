@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! Page-at-a-time SELECT row cursor (port of execute/select_cursor.cpp).
 
 use super::consumed_capacity_totalizer::ConsumedCapacityTotalizer;

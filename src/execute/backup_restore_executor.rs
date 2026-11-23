@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! BACKUP / DROP BACKUP / DESCRIBE BACKUP / RESTORE
 //! (port of src/execute/backup_restore_executor.cpp).
 use crate::client::{

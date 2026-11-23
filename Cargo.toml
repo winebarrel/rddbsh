@@ -4,6 +4,8 @@ version = "0.12.1"
 edition = "2021"
 description = "A SQL-like interactive CLI for Amazon DynamoDB (Rust port of awslabs/dynamodb-shell)"
 license = "Apache-2.0"
+repository = "https://github.com/winebarrel/rddbsh"
+readme = "README.md"
 
 [lib]
 name = "rddbsh"

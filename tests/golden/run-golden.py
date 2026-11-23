@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 ddbsh reimplementation contributors.
+# Copyright 2026 winebarrel
 # SPDX-License-Identifier: Apache-2.0
 """Golden-suite runner for rddbsh (replaces the CMake/CTest golden project).
 

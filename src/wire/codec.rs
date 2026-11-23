@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! Request serialization to the exact AWS-SDK `SerializePayload()` JSON body
 //! (tab-indented; one tab per level and a tab after each key's colon), and
 //! the `%1.15g`/`%1.17g` cJSON number rule (port of wire/codec.cpp).

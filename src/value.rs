@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! The engine's DynamoDB attribute value model (port of include/ddbsh/value.hpp).
 
 /// An ordered attribute map (insertion order preserved, like the C++ ValueMap).

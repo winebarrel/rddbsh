@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! SHOW TABLES (port of src/execute/show_tables_executor.cpp).
 use crate::client::{
     DdbClient, DescribeTableIn, DescribeTableOut, DescribeTimeToLiveIn, ListTablesIn, TimeToLiveOut,

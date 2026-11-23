@@ -1,0 +1,11 @@
+rddbsh
+Copyright 2026 winebarrel
+
+This product is a Rust port of ddbsh (https://github.com/awslabs/dynamodb-shell).
+
+ddbsh
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Licensed under the Apache License, Version 2.0.
+
+The files under tests/golden/ (except run-golden.py) are copied unchanged from
+ddbsh and retain their original copyright notices.

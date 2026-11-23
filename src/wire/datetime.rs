@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! ISO-8601 <-> epoch-seconds helpers (port of wire/datetime.{hpp,cpp}).
 
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {

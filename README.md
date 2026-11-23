@@ -72,3 +72,9 @@ tests/golden/run-golden.py --bin target/debug/rddbsh [--family select] [--endpoi
 ```
 
 The suite targets real DynamoDB (it creates and drops tables). Use `--endpoint` with `--ignore-order` for DynamoDB Local; some families (PITR, vector indexes, warm/on-demand throughput, global tables) need real DynamoDB.
+
+## License
+
+Apache License 2.0. rddbsh is a derivative work of [ddbsh](https://github.com/awslabs/dynamodb-shell) (Copyright Amazon.com, Inc. or its affiliates). See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+rddbsh is not affiliated with or endorsed by Amazon Web Services.

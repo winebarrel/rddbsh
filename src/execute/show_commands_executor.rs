@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! SHOW BACKUPS / SHOW LIMITS / SHOW CREATE TABLE
 //! (port of src/execute/show_commands_executor.cpp).
 use super::describe_executor::vector_distance_name;

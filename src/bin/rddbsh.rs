@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! The rddbsh executable (port of cli/main.cpp): argument parsing, prompt,
 //! line editing + history, isql-style input assembly, config-file loading,
 //! signal handling, and wiring the wire client into the engine.

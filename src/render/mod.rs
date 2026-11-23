@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! Output + EXPLAIN formatting (port of src/render/renderer.cpp).
 use crate::client::{ConsumedCapacity, ItemRow};
 use crate::error::Error;

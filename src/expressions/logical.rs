@@ -1,3 +1,9 @@
+// Copyright 2026 winebarrel
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from ddbsh (https://github.com/awslabs/dynamodb-shell),
+// Copyright Amazon.com, Inc. or its affiliates.
+
 //! The WHERE logical-expression tree (port of expressions/logical_*.hpp).
 //!
 //! Each node carries `negate` (rendered as `NOT (...)`) and `parens`
