@@ -5,6 +5,14 @@ A Rust port of [ddbsh](https://github.com/awslabs/dynamodb-shell), a SQL-like in
 > [!WARNING]
 > rddbsh runs directly against your DynamoDB tables. `delete`, `drop`, `update`, scans and queries are real operations that consume capacity and may incur costs.
 
+## Install
+
+```sh
+brew install winebarrel/rddbsh/rddbsh
+```
+
+Prebuilt archives for macOS (Apple Silicon), Linux (x86_64, aarch64) and Windows (x86_64) are on the [releases page](https://github.com/winebarrel/rddbsh/releases).
+
 ## Build
 
 ```sh
@@ -81,7 +89,7 @@ Releases are built by [dist](https://opensource.axo.dev/cargo-dist/) (`.github/w
 git tag v0.12.1 && git push origin v0.12.1
 ```
 
-The workflow uploads archives for macOS, Linux, and Windows, with checksums, to GitHub Releases.
+The workflow uploads archives (macOS Apple Silicon, Linux, Windows) with checksums to GitHub Releases, then pushes the Homebrew formula to [winebarrel/homebrew-rddbsh](https://github.com/winebarrel/homebrew-rddbsh) using the `HOMEBREW_TAP_TOKEN` secret (a fine-grained token with Contents: Read and write on that repository).
 
 ## License
 
