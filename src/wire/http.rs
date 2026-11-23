@@ -288,12 +288,19 @@ impl HttpTransport {
             }
         };
         let rt = self.runtime()?;
-        let creds = rt.block_on(provider.provide_credentials()).map_err(|e| {
-            transport_error(format!(
-                "Unable to load AWS credentials: {}",
-                error_chain(&e)
-            ))
-        })?;
+        let creds = match rt.block_on(provider.provide_credentials()) {
+            Ok(c) => c,
+            Err(e) => {
+                // aws-config's profile provider reports its initialization
+                // error only once ("... already taken" afterwards), so build
+                // a fresh provider for the next attempt.
+                self.provider = None;
+                return Err(transport_error(format!(
+                    "Unable to load AWS credentials: {}",
+                    error_chain(&e)
+                )));
+            }
+        };
         self.cached = Some(creds.clone());
         Ok(creds)
     }
