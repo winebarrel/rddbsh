@@ -73,6 +73,16 @@ tests/golden/run-golden.py --bin target/debug/rddbsh [--family select] [--endpoi
 
 The suite targets real DynamoDB (it creates and drops tables). Use `--endpoint` with `--ignore-order` for DynamoDB Local; some families (PITR, vector indexes, warm/on-demand throughput, global tables) need real DynamoDB.
 
+## Releasing
+
+Releases are built by [dist](https://opensource.axo.dev/cargo-dist/) (`.github/workflows/release.yml`). Bump `version` in `Cargo.toml`, then push a matching tag:
+
+```sh
+git tag v0.12.1 && git push origin v0.12.1
+```
+
+The workflow uploads archives for macOS, Linux, and Windows, with checksums, to GitHub Releases.
+
 ## License
 
 Apache License 2.0. rddbsh is a derivative work of [ddbsh](https://github.com/awslabs/dynamodb-shell) (Copyright Amazon.com, Inc. or its affiliates). See [LICENSE](LICENSE) and [NOTICE](NOTICE).

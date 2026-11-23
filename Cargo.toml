@@ -26,3 +26,8 @@ regex = "1.13.2"
 rustyline = "19.0.0"
 tokio = { version = "1.54.1", features = ["net", "rt", "rt-multi-thread", "time"] }
 ureq = "3.5.2"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

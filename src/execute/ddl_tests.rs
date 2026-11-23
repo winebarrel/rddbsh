@@ -594,6 +594,7 @@ fn alter_table_on_demand_diagnostic_and_ttl() {
 }
 
 #[test]
+#[allow(clippy::field_reassign_with_default)]
 fn backups() {
     let mut c = Fake::default();
     c.backup_pages = vec![

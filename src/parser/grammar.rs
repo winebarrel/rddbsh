@@ -24,7 +24,7 @@ use crate::value::{Value, ValueList};
 pub fn parse_one(text: &str) -> Result<ParsedStatement> {
     let mut driver = Driver::new(text);
     match driver.parse_next() {
-        Step::Statement(s) => Ok(s),
+        Step::Statement(s) => Ok(*s),
         Step::EmptyAtEof => Ok(ParsedStatement::default()),
         Step::Error(e) => Err(e),
     }
@@ -36,7 +36,7 @@ pub fn parse_batch(text: &str) -> (Vec<ParsedStatement>, Option<Error>) {
     let mut statements = Vec::new();
     loop {
         match driver.parse_next() {
-            Step::Statement(s) => statements.push(s),
+            Step::Statement(s) => statements.push(*s),
             Step::EmptyAtEof => return (statements, None),
             Step::Error(e) => return (statements, Some(e)),
         }
@@ -44,7 +44,7 @@ pub fn parse_batch(text: &str) -> (Vec<ParsedStatement>, Option<Error>) {
 }
 
 enum Step {
-    Statement(ParsedStatement),
+    Statement(Box<ParsedStatement>),
     EmptyAtEof,
     Error(Error),
 }
@@ -185,7 +185,7 @@ impl<'a> Driver<'a> {
                 if stmt.command == CommandNode::Empty && self.saw_eof {
                     Step::EmptyAtEof
                 } else {
-                    Step::Statement(stmt)
+                    Step::Statement(Box::new(stmt))
                 }
             }
         }
