@@ -31,6 +31,8 @@ pub struct ParsedBatch {
 pub struct ConnectionHint {
     pub region: String,
     pub endpoint_overridden: bool,
+    /// the endpoint override (empty when none)
+    pub endpoint: String,
 }
 
 pub struct Session {
@@ -289,6 +291,7 @@ impl Session {
         ConnectionHint {
             region: self.config.region.clone(),
             endpoint_overridden: !self.config.endpoint.is_empty(),
+            endpoint: self.config.endpoint.clone(),
         }
     }
 
