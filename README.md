@@ -5,6 +5,9 @@ A Rust port of [ddbsh](https://github.com/awslabs/dynamodb-shell), a SQL-like in
 > [!WARNING]
 > rddbsh runs directly against your DynamoDB tables. `delete`, `drop`, `update`, scans and queries are real operations that consume capacity and may incur costs.
 
+> [!TIP]
+> Tired of typing `go`? Start with **`rddbsh --immediate`** and each statement runs as soon as you type `;`. See [Immediate mode](#immediate-mode---immediate).
+
 ## Install
 
 ```sh
@@ -23,7 +26,7 @@ cargo build --release
 ## Usage
 
 ```
-rddbsh [-q] [-e] [-d] [-t[TERM]] [--ca-bundle <file>] [-c "<cmds>" | -f <file>]
+rddbsh [-q] [-e] [-d] [-t[TERM]] [--immediate] [--ca-bundle <file>] [-c "<cmds>" | -f <file>]
 ```
 
 | Flag | Description |
@@ -33,6 +36,7 @@ rddbsh [-q] [-e] [-d] [-t[TERM]] [--ca-bundle <file>] [-c "<cmds>" | -f <file>]
 | `-q` | Quiet: suppress the startup banner |
 | `-e` | Abort on the first error |
 | `-t[TERM]`, `--terminator[=TERM]` | Batch terminator (default `go`; `-t` alone = blank line) |
+| **`--immediate`** | **Run each statement as soon as it ends with `;` (no `go` needed)** |
 | `--ca-bundle <file>` | Trust a custom CA bundle (also `AWS_CA_BUNDLE` / profile `ca_bundle`) |
 
 Interactive input follows the isql model: lines are buffered until a line containing only `go` (case-insensitive), then the batch runs.
@@ -48,6 +52,26 @@ CREATE
 INSERT
 {rating: 8.3, title: Up, year: 2009}
 ```
+
+### Immediate mode (`--immediate`)
+
+With `--immediate`, you don't need `go`: a statement runs as soon as a line ends with `;`, like the MySQL and PostgreSQL clients.
+
+```
+$ rddbsh --immediate
+ddbsh - version x.y.z
+us-east-1> select * from movies where title = "Up";
+{rating: 8.3, title: Up, year: 2009}
+us-east-1> select *
+us-east-1>   from movies;
+{rating: 8.3, title: Up, year: 2009}
+```
+
+- A statement can span several lines; nothing runs until the `;`.
+- A `;` inside a string or a comment does not run anything.
+- A transaction (`begin; ... commit;` or `rollback;`) runs as one unit once `commit` or `rollback` is reached.
+- A `go` line still works.
+- To switch modes inside the shell, use `set immediate on` or `set immediate off`. To make immediate mode the default, put `set immediate on` in `~/.ddbsh_config`.
 
 Credentials and region come from the standard AWS chain (environment, profiles, SSO, IMDS).
 

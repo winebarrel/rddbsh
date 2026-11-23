@@ -17,7 +17,7 @@ use rddbsh::render::Renderer;
 use rddbsh::session::{ConnectionHint, Session, SessionConfig};
 
 const USAGE: &str =
-    "Usage: ddbsh [-q] [-e] [-d] [-t[TERM]] [--ca-bundle <file>] [-c \"<cmds>\" | -f <file>]\n";
+    "Usage: ddbsh [-q] [-e] [-d] [-t[TERM]] [--immediate] [--ca-bundle <file>] [-c \"<cmds>\" | -f <file>]\n";
 
 fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
@@ -64,7 +64,7 @@ fn parse_args(prog: &str, args: &[String]) -> Result<Options, ()> {
                 Some((n, v)) => (n, Some(v.to_string())),
                 None => (long, None),
             };
-            let candidates: Vec<&str> = ["terminator", "ca-bundle"]
+            let candidates: Vec<&str> = ["terminator", "immediate", "ca-bundle"]
                 .into_iter()
                 .filter(|c| !name.is_empty() && c.starts_with(name))
                 .collect();
@@ -81,6 +81,12 @@ fn parse_args(prog: &str, args: &[String]) -> Result<Options, ()> {
             };
             if full == "terminator" {
                 set_terminator(&mut o.term, value.as_deref());
+            } else if full == "immediate" {
+                if value.is_some() {
+                    eprintln!("{}: option '--immediate' doesn't allow an argument", prog);
+                    return Err(());
+                }
+                o.term.immediate = true;
             } else {
                 let v = match value {
                     Some(v) => v,
@@ -273,7 +279,10 @@ fn real_main() -> i32 {
         if let Ok(f) = File::open(&cfg) {
             let mut cfg_term = Terminator::default();
             let mut src = StreamLineSource::new(BufReader::new(f));
-            if run_source(&mut session, &renderer, &mut src, &mut cfg_term, true) != 0 {
+            let rv = run_source(&mut session, &renderer, &mut src, &mut cfg_term, true);
+            // `set immediate on` in the config file turns the mode on for the session.
+            opts.term.immediate |= cfg_term.immediate;
+            if rv != 0 {
                 return 1;
             }
         }

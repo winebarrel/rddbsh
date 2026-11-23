@@ -11,6 +11,7 @@
 use std::io::{BufRead, Write};
 
 use crate::outcome::{ExecOutcome, OutcomeSink};
+use crate::parser::lexer::{tokenize, Kw, Tok};
 use crate::render::Renderer;
 use crate::session::{ConnectionHint, Session};
 use crate::statement::StatementKind;
@@ -23,6 +24,9 @@ pub struct Terminator {
     pub blank_line: bool,
     /// the terminator word when !blank_line
     pub word: String,
+    /// `--immediate`: run each statement as soon as it ends with `;`
+    /// (the terminator line still works too)
+    pub immediate: bool,
 }
 
 impl Default for Terminator {
@@ -30,6 +34,7 @@ impl Default for Terminator {
         Terminator {
             blank_line: false,
             word: "go".into(),
+            immediate: false,
         }
     }
 }
@@ -101,6 +106,61 @@ pub fn try_set_terminator_directive(trimmed: &str, term: &mut Terminator) -> boo
         term.word = rest.to_string();
     }
     true
+}
+
+/// Handle the `set immediate on|off` meta-command. Returns true if consumed.
+pub fn try_set_immediate_directive(trimmed: &str, term: &mut Terminator) -> bool {
+    let words: Vec<&str> = trimmed
+        .split([' ', '\t'])
+        .filter(|w| !w.is_empty())
+        .collect();
+    match words.as_slice() {
+        [set, imm, value]
+            if set.eq_ignore_ascii_case("set") && imm.eq_ignore_ascii_case("immediate") =>
+        {
+            if value.eq_ignore_ascii_case("on") {
+                term.immediate = true;
+                true
+            } else if value.eq_ignore_ascii_case("off") {
+                term.immediate = false;
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// In `--immediate` mode: is the buffered text ready to run? True when its
+/// last token is a `;` outside any string or comment, and no `BEGIN`
+/// transaction is still waiting for its `COMMIT` / `ROLLBACK`.
+pub fn statement_complete(buffer: &str) -> bool {
+    let tokens = tokenize(buffer);
+    let mut last = None;
+    let mut at_start = true;
+    let mut in_txn = false;
+    for t in &tokens {
+        match &t.tok {
+            Tok::End => break,
+            // an unterminated string is scanned as a bare quote character
+            Tok::Char('"') => return false,
+            Tok::Semicolon => at_start = true,
+            Tok::Kw(Kw::Explain) if at_start => {}
+            tok => {
+                if at_start {
+                    match tok {
+                        Tok::Kw(Kw::Begin) => in_txn = true,
+                        Tok::Kw(Kw::Commit) | Tok::Kw(Kw::Rollback) => in_txn = false,
+                        _ => {}
+                    }
+                }
+                at_start = false;
+            }
+        }
+        last = Some(&t.tok);
+    }
+    matches!(last, Some(Tok::Semicolon)) && !in_txn
 }
 
 /// A pull source of physical input lines (None = EOF).
@@ -285,7 +345,10 @@ pub fn run_source_with(
         src.set_connection_hint(&session.connection_hint());
         let Some(line) = src.next_line() else { break };
         let trimmed = trim(&line);
-        if buffer.is_empty() && try_set_terminator_directive(trimmed, term) {
+        if buffer.is_empty()
+            && (try_set_terminator_directive(trimmed, term)
+                || try_set_immediate_directive(trimmed, term))
+        {
             continue;
         }
         if is_terminator_line(trimmed, term) {
@@ -298,6 +361,12 @@ pub fn run_source_with(
             buffer.push('\n');
         }
         buffer.push_str(&line);
+        if term.immediate
+            && statement_complete(&buffer)
+            && flush(&mut buffer, &mut last_error, session)
+        {
+            return last_error.unwrap_or(false) as i32;
+        }
     }
     flush(&mut buffer, &mut last_error, session);
     last_error.unwrap_or(false) as i32
@@ -321,6 +390,7 @@ mod tests {
         let t = Terminator {
             blank_line: true,
             word: String::new(),
+            immediate: false,
         };
         assert!(is_terminator_line("", &t));
         assert!(!is_terminator_line("go", &t));
@@ -337,7 +407,8 @@ mod tests {
             t,
             Terminator {
                 blank_line: false,
-                word: "run".into()
+                word: "run".into(),
+                immediate: false,
             }
         );
         assert!(try_set_terminator_directive("set terminator", &mut t));
@@ -368,5 +439,43 @@ mod tests {
             lines.push(l);
         }
         assert_eq!(lines, vec!["a", "b", "", "c"]);
+    }
+
+    #[test]
+    fn immediate_statement_complete() {
+        assert!(statement_complete("select * from t;"));
+        assert!(statement_complete("select *\nfrom t;  -- trailing comment"));
+        assert!(statement_complete("show tables; show version;"));
+        assert!(!statement_complete("select * from t"));
+        assert!(!statement_complete("show tables; select * from t"));
+        // `;` inside a string or a comment does not end the statement
+        assert!(!statement_complete("insert into t (a) values (\"x;"));
+        assert!(statement_complete("insert into t (a) values (\"x;\");"));
+        assert!(!statement_complete("select * from t -- ;"));
+        // a transaction runs only once COMMIT / ROLLBACK is reached
+        assert!(!statement_complete("begin;"));
+        assert!(!statement_complete("begin;\ninsert into t (a) values (1);"));
+        assert!(statement_complete(
+            "begin;\ninsert into t (a) values (1);\ncommit;"
+        ));
+        assert!(statement_complete("begin; rollback;"));
+        assert!(!statement_complete(
+            "explain begin; select * from t where a = 1;"
+        ));
+        assert!(statement_complete(
+            "explain begin; select * from t where a = 1; end;"
+        ));
+        assert!(statement_complete("help begin;"));
+    }
+
+    #[test]
+    fn set_immediate_directive() {
+        let mut t = Terminator::default();
+        assert!(try_set_immediate_directive("set immediate on", &mut t));
+        assert!(t.immediate);
+        assert!(try_set_immediate_directive("SET IMMEDIATE OFF", &mut t));
+        assert!(!t.immediate);
+        assert!(!try_set_immediate_directive("set immediate maybe", &mut t));
+        assert!(!try_set_immediate_directive("set terminator go", &mut t));
     }
 }
