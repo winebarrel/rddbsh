@@ -12,6 +12,7 @@ each test in file order with CTest pass/fail semantics:
   * WILL_FAIL (CMake truthy)     -> invert
 
 `ddbshtest` is emulated exactly like golden-runner.sh: -q is always passed,
+-o/-j forward --output/--json-flavor,
 stdout+stderr are captured combined, -s sorts with C-locale ordering, and
 -T diffs against a golden .exp file.
 
@@ -34,9 +35,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULT_FAMILIES = [
     "basic", "create-drop", "pitr", "symbol-table", "select", "update", "delete",
-    "insert-replace", "composite-gsi", "vector", "transactions", "return-values",
-    "test-cleanup", "cross-account", "help", "explain", "show", "global-tables",
-    "test-cleanup-last",
+    "insert-replace", "composite-gsi", "vector", "vector-filters", "transactions",
+    "return-values", "test-cleanup", "cross-account", "help", "explain", "show",
+    "formats", "contains", "statement-end", "global-tables", "test-cleanup-last",
 ]
 
 CMAKE_TRUE = {"1", "ON", "YES", "TRUE", "Y"}
@@ -210,15 +211,19 @@ IGNORE_ORDER = False
 
 def run_ddbshtest(argv, shell_bin, env):
     """Emulate golden-runner.sh. Returns (exit_code, output_text)."""
-    cmd = file_ = golden = record = None
+    cmd = file_ = golden = record = output_format = json_flavor = None
     sort_output = abort = False
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("-c", "-f", "-T", "-R"):
+        if a in ("-c", "-f", "-T", "-R", "-o", "-j"):
             v = argv[i + 1]
             i += 2
-            if a == "-c":
+            if a == "-o":
+                output_format = v
+            elif a == "-j":
+                json_flavor = v
+            elif a == "-c":
                 cmd = v
             elif a == "-f":
                 file_ = v
@@ -235,6 +240,10 @@ def run_ddbshtest(argv, shell_bin, env):
                     abort = True
         i += 1
     shell_args = [shell_bin, "-q"] + (["-e"] if abort else [])
+    if output_format is not None:
+        shell_args += ["--output", output_format]
+    if json_flavor is not None:
+        shell_args += ["--json-flavor", json_flavor]
     if cmd is not None:
         shell_args += ["-c", cmd]
     elif file_ is not None:
@@ -274,11 +283,13 @@ def run_test(t, shell_bin, env):
         rc, out = proc.returncode, proc.stdout.decode("utf-8", "replace")
     pass_re = t.props.get("PASS_REGULAR_EXPRESSION")
     fail_re = t.props.get("FAIL_REGULAR_EXPRESSION")
+    # CMake's regex `.` also matches a newline, so match with DOTALL.
+    flags = re.M | re.S
     if pass_re:
-        ok = any(re.search(p, out, re.M) for p in pass_re)
+        ok = any(re.search(p, out, flags) for p in pass_re)
     else:
         ok = rc == 0
-    if fail_re and any(re.search(p, out, re.M) for p in fail_re):
+    if fail_re and any(re.search(p, out, flags) for p in fail_re):
         ok = False
     will_fail = t.props.get("WILL_FAIL")
     if will_fail and ";".join(will_fail).upper() in CMAKE_TRUE:

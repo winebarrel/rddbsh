@@ -12,10 +12,11 @@ use crate::client::{
     ListBackupsIn, ListTablesIn, SecondaryIndexSchema, TableKeySchema, VectorIndexSchema,
 };
 use crate::error::{fail, Errc, Result};
-use crate::outcome::{ExecOutcome, ReportOutcome};
+use crate::outcome::{ExecOutcome, OutcomeSink, ReportOutcome, ReportTable};
 use crate::parser::ast::{
     Projection, ProjectionType, ScalarType, SearchSchemaKind, ShowBackupsCmd, ShowCreateTableCmd,
 };
+use crate::value::{Value, ValueMap};
 
 fn key_description(ks: &TableKeySchema) -> String {
     let mut groups: Vec<(&Vec<String>, &str)> = Vec::new();
@@ -240,7 +241,8 @@ fn reconstruct_ddl(cmd: &ShowCreateTableCmd, td: &DescribeTableOut) -> String {
 pub fn execute_show_backups(
     cmd: &ShowBackupsCmd,
     client: &mut dyn DdbClient,
-) -> Result<ExecOutcome> {
+    sink: &mut dyn OutcomeSink,
+) -> Result<()> {
     let mut request = ListBackupsIn {
         table_name: if cmd.table.is_empty() {
             None
@@ -255,9 +257,29 @@ pub fn execute_show_backups(
         limit: 100,
         exclusive_start_backup_arn: None,
     };
-    let mut report = ReportOutcome::default();
+    // One fragment per non-empty ListBackups page, emitted before the next
+    // page is requested. Each carries its rows by column for the output
+    // formats; when no page has a backup, one empty fragment still goes out.
+    let columns: Vec<String> = [
+        "TableName",
+        "BackupName",
+        "BackupStatus",
+        "BackupArn",
+        "CreationDateTime",
+        "ExpiryDateTime",
+    ]
+    .iter()
+    .map(|c| c.to_string())
+    .collect();
+    let mut emitted = false;
     loop {
         let page = client.list_backups(&request)?;
+        let mut report = ReportOutcome::default();
+        let mut table = ReportTable {
+            columns: columns.clone(),
+            rows: vec![],
+            group_end: true,
+        };
         for s in &page.summaries {
             report.lines.push(format!(
                 "Table: {}, Backup: {}, Status: {}, ARN: {}, On: {}, Expires: {}",
@@ -268,28 +290,94 @@ pub fn execute_show_backups(
                 s.creation_datetime,
                 s.expiry_datetime
             ));
+            table.rows.push(vec![
+                ("TableName".into(), Value::S(s.table_name.clone())),
+                ("BackupName".into(), Value::S(s.backup_name.clone())),
+                ("BackupStatus".into(), Value::S(s.backup_status.clone())),
+                ("BackupArn".into(), Value::S(s.backup_arn.clone())),
+                (
+                    "CreationDateTime".into(),
+                    Value::S(s.creation_datetime.clone()),
+                ),
+                ("ExpiryDateTime".into(), Value::S(s.expiry_datetime.clone())),
+            ]);
+        }
+        if !report.lines.is_empty() {
+            report.table = Some(table);
+            sink.emit(ExecOutcome::Report(report));
+            emitted = true;
         }
         match page.last_evaluated_backup_arn {
             Some(arn) => request.exclusive_start_backup_arn = Some(arn),
             None => break,
         }
     }
-    Ok(ExecOutcome::Report(report))
+    if !emitted {
+        sink.emit(ExecOutcome::Report(ReportOutcome {
+            lines: vec![],
+            table: Some(ReportTable {
+                columns,
+                rows: vec![],
+                group_end: true,
+            }),
+        }));
+    }
+    Ok(())
 }
 
-pub fn execute_show_limits(client: &mut dyn DdbClient, region: &str) -> Result<ExecOutcome> {
+fn limit_row(region: &str, limit: &str, rcu: i64, wcu: i64) -> ValueMap {
+    vec![
+        ("Region".into(), Value::S(region.to_string())),
+        ("Limit".into(), Value::S(limit.to_string())),
+        ("RCU".into(), Value::N(rcu.to_string())),
+        ("WCU".into(), Value::N(wcu.to_string())),
+    ]
+}
+
+pub fn execute_show_limits(
+    client: &mut dyn DdbClient,
+    region: &str,
+    sink: &mut dyn OutcomeSink,
+) -> Result<()> {
     let limits = client.describe_limits(&DescribeLimitsIn {})?;
-    let mut lines = vec![
-        format!("Region: {}", region),
-        format!(
-            "Account Max (RCU, WCU): {}, {}",
-            limits.account_max_rcu, limits.account_max_wcu
-        ),
-        format!(
-            "Table Max (RCU, WCU):  {}, {}",
-            limits.table_max_rcu, limits.table_max_wcu
-        ),
-    ];
+    let columns: Vec<String> = ["Region", "Limit", "RCU", "WCU"]
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    // The header lines go out as soon as DescribeLimits returns, before the
+    // ListTables/DescribeTable calls the totals need. Its rows do not end a
+    // group, so the text table shows SHOW LIMITS as one box.
+    sink.emit(ExecOutcome::Report(ReportOutcome {
+        lines: vec![
+            format!("Region: {}", region),
+            format!(
+                "Account Max (RCU, WCU): {}, {}",
+                limits.account_max_rcu, limits.account_max_wcu
+            ),
+            format!(
+                "Table Max (RCU, WCU):  {}, {}",
+                limits.table_max_rcu, limits.table_max_wcu
+            ),
+        ],
+        table: Some(ReportTable {
+            columns: columns.clone(),
+            rows: vec![
+                limit_row(
+                    region,
+                    "Account Max",
+                    limits.account_max_rcu,
+                    limits.account_max_wcu,
+                ),
+                limit_row(
+                    region,
+                    "Table Max",
+                    limits.table_max_rcu,
+                    limits.table_max_wcu,
+                ),
+            ],
+            group_end: false,
+        }),
+    }));
     let listed = client.list_tables(&ListTablesIn {})?;
     let (mut rcus, mut wcus, mut gsircus, mut gsiwcus) = (0i64, 0i64, 0i64, 0i64);
     for name in &listed.table_names {
@@ -311,14 +399,23 @@ pub fn execute_show_limits(client: &mut dyn DdbClient, region: &str) -> Result<E
             gsiwcus += gsi.provisioned_write_capacity_units;
         }
     }
-    lines.push(format!("Total Tables (RCU, WCU): {}, {}", rcus, wcus));
-    lines.push(format!("Total GSI (RCU, WCU): {}, {}", gsircus, gsiwcus));
-    lines.push(format!(
-        "Total (RCU, WCU): {}, {}",
-        rcus + gsircus,
-        wcus + gsiwcus
-    ));
-    Ok(ExecOutcome::Report(ReportOutcome { lines }))
+    sink.emit(ExecOutcome::Report(ReportOutcome {
+        lines: vec![
+            format!("Total Tables (RCU, WCU): {}, {}", rcus, wcus),
+            format!("Total GSI (RCU, WCU): {}, {}", gsircus, gsiwcus),
+            format!("Total (RCU, WCU): {}, {}", rcus + gsircus, wcus + gsiwcus),
+        ],
+        table: Some(ReportTable {
+            columns,
+            rows: vec![
+                limit_row(region, "Total Tables", rcus, wcus),
+                limit_row(region, "Total GSI", gsircus, gsiwcus),
+                limit_row(region, "Total", rcus + gsircus, wcus + gsiwcus),
+            ],
+            group_end: true,
+        }),
+    }));
+    Ok(())
 }
 
 pub fn execute_show_create_table(
@@ -347,5 +444,6 @@ pub fn execute_show_create_table(
     });
     Ok(ExecOutcome::Report(ReportOutcome {
         lines: vec![reconstruct_ddl(cmd, &td)],
+        table: None,
     }))
 }

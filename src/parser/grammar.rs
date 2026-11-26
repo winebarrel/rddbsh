@@ -1248,6 +1248,35 @@ impl<'a> Driver<'a> {
         Value::Param(self.param_count)
     }
 
+    /// contains_operand: the second argument of CONTAINS. A scalar literal
+    /// (string, quoted or bare; number; TRUE; FALSE; NULL) or a `?` marker.
+    /// List and map literals are not accepted (ddbsh 0.12.5, D-P13-3/13).
+    fn contains_operand(&mut self) -> P<Value> {
+        match self.peek().clone() {
+            Tok::Whole(n) | Tok::Float(n) => {
+                self.advance();
+                Ok(Value::N(n))
+            }
+            Tok::Kw(Kw::True) => {
+                self.advance();
+                Ok(Value::Bool(true))
+            }
+            Tok::Kw(Kw::False) => {
+                self.advance();
+                Ok(Value::Bool(false))
+            }
+            Tok::Kw(Kw::Null) => {
+                self.advance();
+                Ok(Value::Null)
+            }
+            Tok::Char('?') => {
+                self.advance();
+                Ok(self.param_marker())
+            }
+            _ => Ok(Value::S(self.string()?)),
+        }
+    }
+
     /// lee_rhs (allow_empty) / insert_value (!allow_empty).
     fn value(&mut self, allow_empty: bool) -> P<Value> {
         match self.peek().clone() {
@@ -1719,9 +1748,9 @@ impl<'a> Driver<'a> {
                 self.advance();
                 let lhs = self.paren_lhs()?;
                 self.expect_char(',')?;
-                let operand = self.string()?;
+                let operand = self.contains_operand()?;
                 self.expect_char(')')?;
-                Ok(LogicalExpr::contains(lhs, Value::S(operand)))
+                Ok(LogicalExpr::contains(lhs, operand))
             }
             Tok::Kw(Kw::Size) => {
                 self.advance();
@@ -1902,6 +1931,28 @@ mod tests {
 
     fn scan_filter(s: &str) -> String {
         select(s).where_.unwrap().scan_filter_expression(None)
+    }
+
+    /// A statement ends only at `;` or the end of input (ddbsh 0.12.5, B4).
+    #[test]
+    fn statement_ends_only_at_semicolon_or_eof() {
+        for (text, tok) in [
+            ("select pk from t consistent;", "consistent"),
+            ("select pk from t foo", "foo"),
+            ("delete from t wehre pk = 1;", "wehre"),
+            ("explain delete from t wehre pk = 1;", "wehre"),
+            ("update t set x = 1 wher pk = 1;", "wher"),
+            ("delete from t where pk = 1 adn rk = 0;", "adn"),
+            ("drop table t foo bar;", "foo"),
+        ] {
+            assert!(
+                err(text)
+                    .message
+                    .contains(&format!("syntax error at {}", tok)),
+                "{}",
+                text
+            );
+        }
     }
 
     #[test]
@@ -2261,6 +2312,25 @@ mod tests {
             scan_filter("select * from t where a in (1, 2) and attribute_type(b, string)"),
             "a IN ({\"N\":\"1\"}, {\"N\":\"2\"}) AND attribute_type(b, S)"
         );
+        assert_eq!(
+            scan_filter("select * from t where a <> 1"),
+            "a <> {\"N\":\"1\"}"
+        );
+        // CONTAINS takes any scalar literal (ddbsh 0.12.5) or a `?` marker.
+        assert_eq!(
+            scan_filter(
+                "select * from t where contains(l, NULL) or contains(ns, 5) or contains(l, TRUE) or contains(l, false) or contains(n, 1.5)"
+            ),
+            "contains(l, \"{\"NULL\":true}\") OR contains(ns, \"{\"N\":\"5\"}\") OR contains(l, \"{\"BOOL\":true}\") OR contains(l, \"{\"BOOL\":false}\") OR contains(n, \"{\"N\":\"1.5\"}\")"
+        );
+        let p = ok("select * from t where contains(l, ?)");
+        assert_eq!(crate::parser::count_param_markers(&p), 1);
+        assert!(err("select * from t where contains(l, [1])")
+            .message
+            .contains("syntax error at ["));
+        assert!(err("select * from t where contains(l, {a: 1})")
+            .message
+            .contains("syntax error at {"));
         let w = select("select * from t where a = 1 and b = 2 and c = 3")
             .where_
             .unwrap();

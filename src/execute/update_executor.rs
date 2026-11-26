@@ -161,7 +161,6 @@ pub fn execute_update(
         cmd.ratelimit.is_some(),
         &mut read_st,
     );
-    let mut explain_out = ExplainOutcome::default();
     let mut acct = BulkWriteOutcome {
         verb,
         ..Default::default()
@@ -170,17 +169,18 @@ pub fn execute_update(
     loop {
         if explain {
             let (api, req) = read_explain_request(&read, &start_key);
-            explain_out.blocks.push(explain_block(client, api, &req)?);
+            emit_explain_block(sink, explain_block(client, api, &req)?);
         }
         let page = read_page(client, &read, &start_key)?;
         if let Some(l) = &mut limiter {
             l.consume_reads(&page.cc);
         }
+        let mut page_writes = ExplainOutcome::default();
         for item in &page.items {
             let mut request = write_template.clone();
             request.key = row_key(item);
             if explain {
-                explain_out.blocks.push(explain_block(
+                page_writes.blocks.push(explain_block(
                     client,
                     "UpdateItem",
                     &ExplainRequest::UpdateItem(request),
@@ -195,8 +195,11 @@ pub fn execute_update(
                 Ok(result) => {
                     acct.modified += 1;
                     if want_rv {
-                        acct.returned_items
-                            .push(result.attributes.clone().unwrap_or_default());
+                        emit_returned_item(
+                            sink,
+                            verb,
+                            result.attributes.clone().unwrap_or_default(),
+                        );
                     }
                     if let Some(l) = &mut limiter {
                         l.consume_writes(&result.consumed_capacity);
@@ -205,6 +208,9 @@ pub fn execute_update(
                 Err(e) if e.code == Errc::ConditionalCheckFailed => acct.ccf += 1,
                 Err(e) => return Err(e),
             }
+        }
+        if !page_writes.blocks.is_empty() {
+            sink.emit(ExecOutcome::Explain(page_writes));
         }
         match page.last_key {
             Some(k) if !k.is_empty() => {
@@ -216,9 +222,7 @@ pub fn execute_update(
             _ => break,
         }
     }
-    if explain {
-        sink.emit(ExecOutcome::Explain(explain_out));
-    } else {
+    if !explain {
         sink.emit(ExecOutcome::BulkWrite(acct));
     }
     Ok(())

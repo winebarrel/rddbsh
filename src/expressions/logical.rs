@@ -100,8 +100,10 @@ impl LogicalExpr {
         }
     }
 
+    /// `!=` desugars to a negated `=`; `<>` is passed through unchanged, as
+    /// in the original.
     pub fn comparison(lhs: impl Into<String>, op: &str, rhs: Value) -> LogicalExpr {
-        if op == "!=" || op == "<>" {
+        if op == "!=" {
             let mut e = Self::leaf(LogicalKind::Comparison {
                 lhs: lhs.into(),
                 op: "=".into(),

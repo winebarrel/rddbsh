@@ -26,7 +26,8 @@ cargo build --release
 ## Usage
 
 ```
-rddbsh [-q] [-e] [-d] [-t[TERM]] [--immediate] [--ca-bundle <file>] [-c "<cmds>" | -f <file>]
+rddbsh [-q] [-e] [-d] [-t[TERM]] [--immediate] [--ca-bundle <file>] [--show-retries]
+       [--output default|json|csv|table] [--json-flavor plain|dynamodb] [-c "<cmds>" | -f <file>]
 ```
 
 | Flag | Description |
@@ -38,6 +39,9 @@ rddbsh [-q] [-e] [-d] [-t[TERM]] [--immediate] [--ca-bundle <file>] [-c "<cmds>"
 | `-t[TERM]`, `--terminator[=TERM]` | Batch terminator (default `go`; `-t` alone = blank line) |
 | **`--immediate`** | **Run each statement as soon as it ends with `;` (no `go` needed)** |
 | `--ca-bundle <file>` | Trust a custom CA bundle (also `AWS_CA_BUNDLE` / profile `ca_bundle`) |
+| `--show-retries` | Print a line to stderr for each retry (throttling or a transient error), before its backoff |
+| `--output <format>` | Output format for rows: `default`, `json`, `csv` or `table`. See [Output formats](#output-formats) |
+| `--json-flavor <flavor>` | How JSON writes values: `plain` (default) or `dynamodb` (`{"N": "1"}`) |
 
 Interactive input follows the isql model: lines are buffered until a line containing only `go` (case-insensitive), then the batch runs.
 
@@ -73,6 +77,24 @@ us-east-1>   from movies;
 - A `go` line still works.
 - To switch modes inside the shell, use `set immediate on` or `set immediate off`. To make immediate mode the default, put `set immediate on` in `~/.ddbsh_config`.
 
+### Output formats
+
+`--output json|csv|table` changes how rows are printed: the items of a `SELECT`, a read transaction and `RETURN VALUES`, and the rows of `SHOW TABLES`, `SHOW BACKUPS` and `SHOW LIMITS`. Status lines, `DESCRIBE`, `EXPLAIN` and errors stay text.
+
+```
+$ rddbsh -q --output table -c 'select * from movies where title = "Up"'
++-------+------+--------+
+| title | year | rating |
++-------+------+--------+
+| Up    | 2009 |    8.3 |
++-------+------+--------+
+```
+
+- `json` prints one JSON array per result set. `--json-flavor dynamodb` writes the DynamoDB typed encoding (`{"N": "8.3"}`) instead of plain values.
+- `csv` prints a header, then one line per row (RFC 4180 quoting).
+- `table` prints a text table per API page.
+- `set output <format>` and `set json-flavor <flavor>` on their own line at the start of a batch change the format mid-session. In `~/.ddbsh_config` they set the default; the flags override them.
+
 ### Tab completion
 
 Press <kbd>Tab</kbd> to complete keywords and table names. Table names are offered after `from`, `into`, `update`, `describe`, `table` and similar keywords. They come from `ListTables` and are cached for 30 seconds.
@@ -106,6 +128,8 @@ cargo test
 ```sh
 tests/golden/run-golden.py --bin target/debug/rddbsh [--family select] [--endpoint URL] [--ignore-order]
 ```
+
+`ifmt-bad-output` and `ifmt-bad-flavor` are expected to fail: their goldens hold ddbsh's usage line, and rddbsh's also lists `--immediate`.
 
 The suite targets real DynamoDB (it creates and drops tables). Use `--endpoint` with `--ignore-order` for DynamoDB Local; some families (PITR, vector indexes, warm/on-demand throughput, global tables) need real DynamoDB.
 

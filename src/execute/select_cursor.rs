@@ -22,7 +22,12 @@ pub struct SelectRowCursor {
     limiter: Option<RateLimiter>,
     totalizer: ConsumedCapacityTotalizer,
     report_capacity: bool,
+    column_hint: Vec<String>,
     more: bool,
+    /// A ratelimit sleep is owed before the next request: set after a page
+    /// that has a successor, taken at the start of the next fetch, so the
+    /// previous page is emitted before the sleep.
+    throttle_pending: bool,
 }
 
 pub fn open_select_cursor(
@@ -49,7 +54,9 @@ pub fn open_select_cursor(
         limiter,
         totalizer: ConsumedCapacityTotalizer::default(),
         report_capacity: cmd.rcc != ReturnConsumedCapacity::None,
+        column_hint: plan.column_hint,
         more: true,
+        throttle_pending: false,
     })
 }
 
@@ -57,6 +64,12 @@ impl SelectRowCursor {
     /// The next non-empty page of rows, or `None` when exhausted.
     pub fn next_page(&mut self, client: &mut dyn DdbClient) -> Result<Option<Vec<ItemRow>>> {
         while self.more {
+            if self.throttle_pending {
+                self.throttle_pending = false;
+                if let Some(l) = &mut self.limiter {
+                    l.readlimit();
+                }
+            }
             let mut items: Vec<ItemRow> = Vec::new();
             let cc: Option<ConsumedCapacity>;
             let mut last_evaluated_key: Option<ValueMap> = None;
@@ -98,9 +111,7 @@ impl SelectRowCursor {
                         } else {
                             self.scan.exclusive_start_key = Some(lek);
                         }
-                        if let Some(l) = &mut self.limiter {
-                            l.readlimit();
-                        }
+                        self.throttle_pending = self.limiter.is_some();
                     }
                     _ => self.more = false,
                 }
@@ -110,6 +121,11 @@ impl SelectRowCursor {
             }
         }
         Ok(None)
+    }
+
+    /// The columns the output formats show first (SelectOutcome::column_hint).
+    pub fn column_hint(&self) -> &[String] {
+        &self.column_hint
     }
 
     pub fn consumed_capacity(&self) -> Option<ConsumedCapacity> {

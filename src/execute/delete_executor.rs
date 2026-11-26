@@ -116,16 +116,14 @@ pub fn execute_delete(
         cmd.ratelimit.is_some(),
         &mut read_st,
     );
-    let mut explain_out = ExplainOutcome::default();
     let mut acct = BulkWriteOutcome {
         verb: BulkVerb::Del,
         ..Default::default()
     };
     if explain {
         let (api, req) = read_explain_request(&read, &None);
-        explain_out.blocks.push(explain_block(client, api, &req)?);
+        emit_explain_block(sink, explain_block(client, api, &req)?);
         if read.api == WriteReadApi::Query {
-            sink.emit(ExecOutcome::Explain(explain_out));
             return Ok(());
         }
     }
@@ -135,11 +133,12 @@ pub fn execute_delete(
         if let Some(l) = &mut limiter {
             l.consume_reads(&page.cc);
         }
+        let mut page_writes = ExplainOutcome::default();
         for item in &page.items {
             let mut request = write_template.clone();
             request.key = row_key(item);
             if explain {
-                explain_out.blocks.push(explain_block(
+                page_writes.blocks.push(explain_block(
                     client,
                     "DeleteItem",
                     &ExplainRequest::DeleteItem(request),
@@ -154,8 +153,11 @@ pub fn execute_delete(
                 Ok(result) => {
                     acct.modified += 1;
                     if want_rv {
-                        acct.returned_items
-                            .push(result.attributes.clone().unwrap_or_default());
+                        emit_returned_item(
+                            sink,
+                            BulkVerb::Del,
+                            result.attributes.clone().unwrap_or_default(),
+                        );
                     }
                     if let Some(l) = &mut limiter {
                         l.consume_writes(&result.consumed_capacity);
@@ -164,6 +166,9 @@ pub fn execute_delete(
                 Err(e) if e.code == Errc::ConditionalCheckFailed => acct.ccf += 1,
                 Err(e) => return Err(e),
             }
+        }
+        if !page_writes.blocks.is_empty() {
+            sink.emit(ExecOutcome::Explain(page_writes));
         }
         match page.last_key {
             Some(k) if !k.is_empty() => {
@@ -175,9 +180,7 @@ pub fn execute_delete(
             _ => break,
         }
     }
-    if explain {
-        sink.emit(ExecOutcome::Explain(explain_out));
-    } else {
+    if !explain {
         sink.emit(ExecOutcome::BulkWrite(acct));
     }
     Ok(())

@@ -39,6 +39,7 @@ pub fn execute_select(
         outcome.items.extend(page);
     }
     outcome.consumed_capacity = cursor.consumed_capacity();
+    outcome.column_hint = cursor.column_hint().to_vec();
     Ok(ExecOutcome::Select(outcome))
 }
 
@@ -80,16 +81,29 @@ pub fn execute_select_streaming(
         return Ok(());
     }
     let mut cursor = open_select_cursor(cmd, client, prefix)?;
+    // Every fragment carries the column hint the output formats use.
+    let mut emitted = false;
     while let Some(page) = cursor.next_page(client)? {
         sink.emit(ExecOutcome::Select(SelectOutcome {
             items: page,
             consumed_capacity: None,
+            column_hint: cursor.column_hint().to_vec(),
+        }));
+        emitted = true;
+    }
+    // A SELECT that found nothing emits one empty fragment, so a formatted
+    // output still opens (and closes) its result set. It renders nothing in
+    // the default format.
+    if !emitted {
+        sink.emit(ExecOutcome::Select(SelectOutcome {
+            column_hint: cursor.column_hint().to_vec(),
+            ..Default::default()
         }));
     }
     if let Some(cc) = cursor.consumed_capacity() {
         sink.emit(ExecOutcome::Select(SelectOutcome {
-            items: vec![],
             consumed_capacity: Some(cc),
+            ..Default::default()
         }));
     }
     Ok(())

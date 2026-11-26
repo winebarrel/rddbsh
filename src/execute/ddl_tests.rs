@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::client::*;
 use crate::error::{Errc, Error, Result};
-use crate::outcome::ExecOutcome;
+use crate::outcome::{BufferingSink, ExecOutcome, OutcomeSink};
 use crate::parser::ast::*;
 use crate::render::Renderer;
 
@@ -19,7 +19,6 @@ use super::create_table_executor::*;
 use super::describe_executor::*;
 use super::drop_table_executor::*;
 use super::show_commands_executor::*;
-use super::show_tables_executor::*;
 
 #[derive(Default)]
 struct Fake {
@@ -209,6 +208,30 @@ impl DdbClient for Fake {
 
 fn render(o: &ExecOutcome) -> String {
     Renderer.render(o)
+}
+
+// The streaming executors, buffered into one outcome (local fns shadow the
+// glob imports).
+fn streamed(f: impl FnOnce(&mut dyn OutcomeSink) -> Result<()>) -> Result<ExecOutcome> {
+    let mut sink = BufferingSink::default();
+    f(&mut sink)?;
+    Ok(ExecOutcome::Multi(sink.parts))
+}
+
+fn execute_describe(cmd: &DescribeCmd, c: &mut dyn DdbClient) -> Result<ExecOutcome> {
+    streamed(|s| super::describe_executor::execute_describe(cmd, c, s))
+}
+
+fn execute_show_tables(cmd: &ShowTablesCmd, c: &mut dyn DdbClient) -> Result<ExecOutcome> {
+    streamed(|s| super::show_tables_executor::execute_show_tables(cmd, c, s))
+}
+
+fn execute_show_backups(cmd: &ShowBackupsCmd, c: &mut dyn DdbClient) -> Result<ExecOutcome> {
+    streamed(|s| super::show_commands_executor::execute_show_backups(cmd, c, s))
+}
+
+fn execute_show_limits(c: &mut dyn DdbClient, region: &str) -> Result<ExecOutcome> {
+    streamed(|s| super::show_commands_executor::execute_show_limits(c, region, s))
 }
 
 fn base_provisioned(name: &str) -> DescribeTableOut {
@@ -871,7 +894,7 @@ fn composite_gsi_key_description() {
 
 fn run_cli(source: &str, abort_on_error: bool) -> (i32, String, String) {
     use crate::cli::{run_source_with, StreamLineSource, Terminator};
-    use crate::outcome::BufferingSink;
+    use crate::render::format::{FormatOptions, FormattingSink, Stream};
     use crate::session::{Session, SessionConfig};
     let mut session = Session::new(
         SessionConfig {
@@ -882,23 +905,47 @@ fn run_cli(source: &str, abort_on_error: bool) -> (i32, String, String) {
     );
     let mut src = StreamLineSource::new(source.as_bytes());
     let mut term = Terminator::default();
-    let mut sink = BufferingSink::default();
+    let mut out = String::new();
     let mut errors = String::new();
-    let rc = run_source_with(
-        &mut session,
-        &Renderer,
-        &mut src,
-        &mut term,
-        abort_on_error,
-        &mut sink,
-        &mut |e: &str| errors.push_str(e),
-    );
-    let out: String = sink.parts.iter().map(|p| Renderer.render(p)).collect();
+    let rc = {
+        let mut sink = FormattingSink::new(
+            FormatOptions::default(),
+            Box::new(|stream, text, _| {
+                if stream == Stream::Out {
+                    out.push_str(text)
+                }
+            }),
+        );
+        run_source_with(
+            &mut session,
+            &Renderer,
+            &mut src,
+            &mut term,
+            abort_on_error,
+            &mut sink,
+            &mut |e: &str| errors.push_str(e),
+        )
+    };
     (rc, out, errors)
 }
 
 const FAIL: &str = "describe nope;";
 const OK: &str = "drop table if exists gone;";
+
+#[test]
+fn cli_output_directives() {
+    let (rc, out, errors) = run_cli(
+        "set output xml\nshow version;\ngo\nset output json\nshow tables;\ngo\nset output default\nshow tables;\n",
+        false,
+    );
+    assert_eq!(rc, 0);
+    assert_eq!(
+        errors,
+        "unknown output format: xml (expected default, json, csv, table)\n"
+    );
+    assert!(out.starts_with("ddbsh - version "));
+    assert!(out.ends_with("\n[]\n"), "{:?}", out);
+}
 
 #[test]
 fn cli_exit_codes_last_executed_statement() {

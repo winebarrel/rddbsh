@@ -119,7 +119,7 @@ pub fn execute_describe_backup(
         "Backup Expiry Date/Time: {}",
         b.backup_expiry_datetime
     ));
-    Ok(ExecOutcome::Report(ReportOutcome { lines }))
+    Ok(ExecOutcome::Report(ReportOutcome { lines, table: None }))
 }
 
 pub fn execute_restore(

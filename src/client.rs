@@ -300,6 +300,20 @@ pub struct ListTablesOut {
     pub table_names: Vec<String>,
 }
 
+/// One page of ListTables (SHOW TABLES reads one page at a time so each row
+/// reaches the sink as soon as its describe calls return).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ListTablesPageIn {
+    /// None (or empty) => first page.
+    pub exclusive_start_table_name: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ListTablesPageOut {
+    pub table_names: Vec<String>,
+    /// None => last page.
+    pub last_evaluated_table_name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TableKeySchema {
     pub hash_keys: Vec<String>,
@@ -605,6 +619,18 @@ pub trait DdbClient {
     fn list_backups(&mut self, input: &ListBackupsIn) -> Result<ListBackupsOut>;
     fn delete_table(&mut self, input: &DeleteTableIn) -> Result<()>;
     fn list_tables(&mut self, input: &ListTablesIn) -> Result<ListTablesOut>;
+    /// One page of ListTables. The default returns the whole list_tables()
+    /// result as a single last page; the wire client sends one request per call.
+    fn list_tables_page(&mut self, input: &ListTablesPageIn) -> Result<ListTablesPageOut> {
+        if input.exclusive_start_table_name.is_some() {
+            return Ok(ListTablesPageOut::default());
+        }
+        let all = self.list_tables(&ListTablesIn {})?;
+        Ok(ListTablesPageOut {
+            table_names: all.table_names,
+            last_evaluated_table_name: None,
+        })
+    }
     fn describe_table(&mut self, input: &DescribeTableIn) -> Result<DescribeTableOut>;
     fn update_item(&mut self, input: &UpdateItemIn) -> Result<UpdateItemOut>;
     fn delete_item(&mut self, input: &DeleteItemIn) -> Result<DeleteItemOut>;
@@ -626,4 +652,7 @@ pub trait DdbClient {
     fn connection_descriptor(&self) -> String {
         "direct client".to_string()
     }
+    /// Register (or clear, with None) the observer told about each retry the
+    /// transport makes, before its backoff. The default ignores it.
+    fn set_retry_observer(&mut self, _observer: Option<crate::retry::RetryObserver>) {}
 }

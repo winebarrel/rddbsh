@@ -21,6 +21,7 @@ pub mod outcome;
 pub mod parser;
 pub mod planner;
 pub mod render;
+pub mod retry;
 pub mod session;
 pub mod statement;
 pub mod table_schema;
