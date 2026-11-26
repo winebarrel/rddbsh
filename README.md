@@ -36,7 +36,7 @@ rddbsh [-q] [-e] [-d] [-t[TERM]] [--immediate] [--ca-bundle <file>] [-c "<cmds>"
 | `-q` | Quiet: suppress the startup banner |
 | `-e` | Abort on the first error |
 | `-t[TERM]`, `--terminator[=TERM]` | Batch terminator (default `go`; `-t` alone = blank line) |
-| **`--immediate`** | **Run each statement as soon as it ends with `;` (no `go` needed)** |
+| `--immediate` | Run each statement as soon as it ends with `;` (no `go` needed) |
 | `--ca-bundle <file>` | Trust a custom CA bundle (also `AWS_CA_BUNDLE` / profile `ca_bundle`) |
 
 Interactive input follows the isql model: lines are buffered until a line containing only `go` (case-insensitive), then the batch runs.
