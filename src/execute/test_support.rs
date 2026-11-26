@@ -496,6 +496,158 @@ mod tests {
         assert_eq!(explain_api(&o), ["SearchVectors"]);
     }
 
+    /// Projection aliased before the filter; the filter reuses the name.
+    #[test]
+    fn search_vectors_filter_and_projection_aliased() {
+        let mut c = FakeDdbClient::default();
+        let mut t = table("docs", "id", "");
+        t.vector_indexes.push(VectorIndexSchema {
+            index_name: "embidx".into(),
+            dimensions: 2,
+            ..Default::default()
+        });
+        c.set_table(t);
+        let stmt = crate::parser::parse_one(
+            "select id, category from docs.embidx where category = \"news\" nearest 10 to [0, 0]",
+        )
+        .unwrap();
+        let CommandNode::Select(cmd) = &stmt.command else {
+            panic!()
+        };
+        execute_select(cmd, &mut c, "aaa").unwrap();
+        let req = &c.search_vectors_requests[0];
+        assert_eq!(req.topk, 10);
+        assert_eq!(req.projection_expression.as_deref(), Some("#aaaa1, #aaaa2"));
+        assert_eq!(
+            req.search_condition_expression.as_deref(),
+            Some("#aaaa2 = :vaaa1")
+        );
+        assert_eq!(
+            req.expression_attribute_names,
+            names(&[("#aaaa1", "id"), ("#aaaa2", "category")])
+        );
+        assert_eq!(
+            req.expression_attribute_values,
+            vec![(":vaaa1".to_string(), Value::S("news".into()))]
+        );
+    }
+
+    /// Every SearchConditionExpression form for vector-index inline filters
+    /// (port of upstream SelectExec.SearchVectorsConditionOperators).
+    #[test]
+    fn search_vectors_condition_operators() {
+        type Case<'a> = (&'a str, &'a str, Vec<(&'a str, &'a str)>, Vec<Value>);
+        let cases: Vec<Case> = vec![
+            ("price < 30", "#aaaa1 < :vaaa1", vec![("#aaaa1", "price")], vec![n("30")]),
+            ("price <= 30", "#aaaa1 <= :vaaa1", vec![("#aaaa1", "price")], vec![n("30")]),
+            ("price > 40", "#aaaa1 > :vaaa1", vec![("#aaaa1", "price")], vec![n("40")]),
+            ("price >= 40", "#aaaa1 >= :vaaa1", vec![("#aaaa1", "price")], vec![n("40")]),
+            (
+                "price between 20 and 40",
+                "#aaaa1 BETWEEN :vaaa1 AND :vaaa2",
+                vec![("#aaaa1", "price")],
+                vec![n("20"), n("40")],
+            ),
+            (
+                "brand <> \"acme\"",
+                "#aaaa1 <> :vaaa1",
+                vec![("#aaaa1", "brand")],
+                vec![Value::S("acme".into())],
+            ),
+            (
+                "brand != \"acme\"",
+                "NOT (#aaaa1 = :vaaa1)",
+                vec![("#aaaa1", "brand")],
+                vec![Value::S("acme".into())],
+            ),
+            (
+                "price in (10, 20, 60)",
+                "#aaaa1 IN (:vaaa1, :vaaa2, :vaaa3)",
+                vec![("#aaaa1", "price")],
+                vec![n("10"), n("20"), n("60")],
+            ),
+            (
+                "attribute_exists(brand)",
+                "attribute_exists(#aaaa1)",
+                vec![("#aaaa1", "brand")],
+                vec![],
+            ),
+            (
+                "attribute_not_exists(brand)",
+                "NOT (attribute_exists(#aaaa1))",
+                vec![("#aaaa1", "brand")],
+                vec![],
+            ),
+            (
+                "not (brand = \"acme\")",
+                "NOT (#aaaa1 = :vaaa1)",
+                vec![("#aaaa1", "brand")],
+                vec![Value::S("acme".into())],
+            ),
+            (
+                "brand = \"acme\" or price > 50",
+                "#aaaa1 = :vaaa1 OR #aaaa2 > :vaaa2",
+                vec![("#aaaa1", "brand"), ("#aaaa2", "price")],
+                vec![Value::S("acme".into()), n("50")],
+            ),
+            (
+                "tenant = \"t2\" and (brand in (\"acme\", \"cirque\") or not (rating between 1 and 2))",
+                "#aaaa1 = :vaaa1 AND (#aaaa2 IN (:vaaa2, :vaaa3) OR NOT (#aaaa3 BETWEEN :vaaa4 AND :vaaa5))",
+                vec![("#aaaa1", "tenant"), ("#aaaa2", "brand"), ("#aaaa3", "rating")],
+                vec![
+                    Value::S("t2".into()),
+                    Value::S("acme".into()),
+                    Value::S("cirque".into()),
+                    n("1"),
+                    n("2"),
+                ],
+            ),
+        ];
+        for (where_, condition, want_names, want_values) in cases {
+            let mut c = FakeDdbClient::default();
+            let mut t = table("docs", "id", "");
+            t.vector_indexes.push(VectorIndexSchema {
+                index_name: "embidx".into(),
+                dimensions: 2,
+                ..Default::default()
+            });
+            c.set_table(t);
+            let text = format!(
+                "select * from docs.embidx where {} nearest 3 to [0, 0]",
+                where_
+            );
+            let stmt = crate::parser::parse_one(&text).unwrap();
+            let CommandNode::Select(cmd) = &stmt.command else {
+                panic!("{}", where_)
+            };
+            execute_select(cmd, &mut c, "aaa").unwrap();
+            let req = &c.search_vectors_requests[0];
+            assert!(req.projection_expression.is_none(), "{}", where_);
+            assert_eq!(
+                req.search_condition_expression.as_deref(),
+                Some(condition),
+                "{}",
+                where_
+            );
+            assert_eq!(
+                req.expression_attribute_names,
+                names(&want_names),
+                "{}",
+                where_
+            );
+            let values: Vec<Value> = req
+                .expression_attribute_values
+                .iter()
+                .enumerate()
+                .map(|(i, (k, v))| {
+                    assert_eq!(k, &format!(":vaaa{}", i + 1));
+                    v.clone()
+                })
+                .collect();
+            assert_eq!(values, want_values, "{}", where_);
+        }
+    }
+
     fn insert_cmd(rows: usize) -> InsertCmd {
         InsertCmd {
             table_name: "t".into(),
@@ -662,8 +814,10 @@ mod tests {
         c.pages = vec![vec![row(&[("a", n("1"))])], vec![row(&[("a", n("2"))])]];
         let mut sink = BufferingSink::default();
         execute_update(&update_cmd(None), &mut c, &mut gen(), true, &mut sink).unwrap();
+        // Each read block goes out before its read, each page's writes after it.
+        assert_eq!(sink.parts.len(), 4);
         assert_eq!(
-            explain_api(&sink.parts[0]),
+            sink.parts.iter().flat_map(explain_api).collect::<Vec<_>>(),
             ["Scan", "UpdateItem", "Scan", "UpdateItem"]
         );
         assert!(c.update_requests.is_empty());
@@ -701,8 +855,9 @@ mod tests {
         };
         let mut sink = BufferingSink::default();
         execute_delete(&cmd, &mut c, &mut gen(), true, &mut sink).unwrap();
+        assert_eq!(sink.parts.len(), 2);
         assert_eq!(
-            explain_api(&sink.parts[0]),
+            sink.parts.iter().flat_map(explain_api).collect::<Vec<_>>(),
             ["Scan", "DeleteItem", "DeleteItem", "DeleteItem"]
         );
         let ExplainRequest::Scan(s) = &c.explain_requests[0] else {

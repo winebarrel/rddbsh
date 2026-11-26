@@ -10,9 +10,11 @@
 
 use std::io::{BufRead, Write};
 
-use crate::outcome::{ExecOutcome, OutcomeSink};
+use crate::outcome::OutcomeSink;
 use crate::parser::lexer::{tokenize, Kw, Tok};
+use crate::render::format::{FormatOptions, FormattingSink, JsonFlavor, OutputFormat, Stream};
 use crate::render::Renderer;
+use crate::retry::RetryEvent;
 use crate::session::{ConnectionHint, Session};
 use crate::statement::StatementKind;
 
@@ -207,24 +209,118 @@ pub struct BatchStatus {
     pub last_error: Option<bool>,
 }
 
-/// Writes rendered stdout/stderr bytes to the process streams.
-pub struct StdioSink {
-    pub renderer: Renderer,
-}
-
-impl OutcomeSink for StdioSink {
-    fn emit(&mut self, fragment: ExecOutcome) {
-        let out = self.renderer.render(&fragment);
-        let mut stdout = std::io::stdout().lock();
-        let _ = stdout.write_all(out.as_bytes());
-        let _ = stdout.flush();
-        let diag = self.renderer.render_stderr(&fragment);
-        if !diag.is_empty() {
-            let mut stderr = std::io::stderr().lock();
-            let _ = stderr.write_all(diag.as_bytes());
-            let _ = stderr.flush();
+/// Write `text` to stdout or stderr and flush, so each piece of output is out
+/// before the engine makes its next API call. In the default format a write
+/// stops at an embedded NUL byte, like the original's printf; the other
+/// formats write every byte.
+fn write_and_flush(stream: Stream, text: &str, options: &FormatOptions) {
+    let text = if options.format == OutputFormat::Standard {
+        text.split('\0').next().unwrap_or("")
+    } else {
+        text
+    };
+    match stream {
+        Stream::Out => {
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.flush();
+        }
+        Stream::Err => {
+            let mut err = std::io::stderr().lock();
+            let _ = err.write_all(text.as_bytes());
+            let _ = err.flush();
         }
     }
+}
+
+/// The CLI's sink: a FormattingSink that writes result bytes to stdout and
+/// diagnostics to stderr, flushing after every write.
+pub fn stdio_sink(options: FormatOptions) -> FormattingSink<'static> {
+    FormattingSink::new(options, Box::new(write_and_flush))
+}
+
+/// `unknown output format: <id> (expected default, json, csv, table)\n`
+pub fn unknown_output_format_message(id: &str) -> String {
+    format!(
+        "unknown output format: {} (expected default, json, csv, table)\n",
+        id
+    )
+}
+
+/// `unknown JSON flavor: <id> (expected plain, dynamodb)\n`
+pub fn unknown_json_flavor_message(id: &str) -> String {
+    format!("unknown JSON flavor: {} (expected plain, dynamodb)\n", id)
+}
+
+/// Recognize `set output <format>` / `set json-flavor <flavor>` at the start
+/// of a batch. Returns None when the line is neither; otherwise Some(Ok(())) after
+/// updating `options`, or Some(Err(message)) for an unknown value (options
+/// unchanged).
+pub fn try_set_output_directive(
+    trimmed: &str,
+    options: &mut FormatOptions,
+) -> Option<Result<(), String>> {
+    let mut rest = trimmed;
+    let mut next_token = || -> &str {
+        let t = rest.trim_start_matches([' ', '\t']);
+        let end = t.find([' ', '\t']).unwrap_or(t.len());
+        rest = &t[end..];
+        &t[..end]
+    };
+    if !next_token().eq_ignore_ascii_case("set") {
+        return None;
+    }
+    let what = next_token();
+    let output = what.eq_ignore_ascii_case("output");
+    if !output && !what.eq_ignore_ascii_case("json-flavor") {
+        return None;
+    }
+    let value = strip_quotes(trim(rest));
+    if output {
+        match OutputFormat::parse(value) {
+            Some(f) => options.format = f,
+            None => return Some(Err(unknown_output_format_message(value))),
+        }
+    } else {
+        match JsonFlavor::parse(value) {
+            Some(f) => options.json_flavor = f,
+            None => return Some(Err(unknown_json_flavor_message(value))),
+        }
+    }
+    Some(Ok(()))
+}
+
+/// The text of one `--show-retries` line, newline included:
+///   `ddbsh: Scan throttled (ProvisionedThroughputExceededException); attempt 2 of 11 in 150 ms`
+pub fn format_retry_line(event: &RetryEvent) -> String {
+    let mut line = String::from("ddbsh: ");
+    line += if event.operation.is_empty() {
+        "request"
+    } else {
+        &event.operation
+    };
+    line += if event.throttled {
+        " throttled"
+    } else {
+        " failed"
+    };
+    if !event.error_code.is_empty() {
+        line += &format!(" ({})", event.error_code);
+    }
+    line += &format!("; attempt {}", event.attempt);
+    if event.max_attempts > 0 {
+        line += &format!(" of {}", event.max_attempts);
+    }
+    if let Some(d) = event.delay {
+        line += &format!(" in {} ms", d.as_millis());
+    }
+    line.push('\n');
+    line
+}
+
+/// The `--show-retries` observer: one stderr line per retry, flushed.
+pub fn write_retry_line(event: &RetryEvent) {
+    report_error_to_stderr(&format_retry_line(event));
 }
 
 fn report_error_to_stderr(rendered: &str) {
@@ -266,38 +362,20 @@ pub fn run_batch(
     status
 }
 
-/// run_batch writing to the process stdout/stderr.
-pub fn run_batch_text(
-    session: &mut Session,
-    renderer: &Renderer,
-    text: &str,
-    abort_on_error: bool,
-) -> BatchStatus {
-    let mut sink = StdioSink {
-        renderer: *renderer,
-    };
-    run_batch(
-        session,
-        renderer,
-        text,
-        abort_on_error,
-        &mut sink,
-        &mut report_error_to_stderr,
-    )
-}
-
-/// Drive a line source to completion writing to stdout/stderr; returns the exit code.
+/// Drive a line source to completion writing to stdout/stderr; returns the
+/// exit code. The sink starts with `*format`, and `*format` receives the
+/// selection in force at the end (so a config file's `set output` carries
+/// into the session).
 pub fn run_source(
     session: &mut Session,
     renderer: &Renderer,
     src: &mut dyn LineSource,
     term: &mut Terminator,
     abort_on_error: bool,
+    format: &mut FormatOptions,
 ) -> i32 {
-    let mut sink = StdioSink {
-        renderer: *renderer,
-    };
-    run_source_with(
+    let mut sink = stdio_sink(*format);
+    let rc = run_source_with(
         session,
         renderer,
         src,
@@ -305,7 +383,9 @@ pub fn run_source(
         abort_on_error,
         &mut sink,
         &mut report_error_to_stderr,
-    )
+    );
+    *format = sink.options();
+    rc
 }
 
 /// Drive a line source: buffer lines until a terminator line, then flush the
@@ -317,42 +397,61 @@ pub fn run_source_with(
     src: &mut dyn LineSource,
     term: &mut Terminator,
     abort_on_error: bool,
-    sink: &mut dyn OutcomeSink,
+    sink: &mut FormattingSink,
     report_error: &mut dyn FnMut(&str),
 ) -> i32 {
     let mut buffer = String::new();
     let mut last_error: Option<bool> = None;
-    let mut flush =
-        |buffer: &mut String, last_error: &mut Option<bool>, session: &mut Session| -> bool {
-            if buffer.is_empty() {
-                return false;
-            }
-            let st = run_batch(
-                session,
-                renderer,
-                buffer,
-                abort_on_error,
-                sink,
-                report_error,
-            );
-            buffer.clear();
-            if st.last_error.is_some() {
-                *last_error = st.last_error;
-            }
-            st.quit || st.aborted
-        };
+    let flush = |buffer: &mut String,
+                 last_error: &mut Option<bool>,
+                 session: &mut Session,
+                 sink: &mut FormattingSink,
+                 report_error: &mut dyn FnMut(&str)|
+     -> bool {
+        if buffer.is_empty() {
+            return false;
+        }
+        let st = run_batch(
+            session,
+            renderer,
+            buffer,
+            abort_on_error,
+            sink,
+            report_error,
+        );
+        buffer.clear();
+        if st.last_error.is_some() {
+            *last_error = st.last_error;
+        }
+        st.quit || st.aborted
+    };
     loop {
         src.set_connection_hint(&session.connection_hint());
         let Some(line) = src.next_line() else { break };
         let trimmed = trim(&line);
-        if buffer.is_empty()
-            && (try_set_terminator_directive(trimmed, term)
-                || try_set_immediate_directive(trimmed, term))
-        {
-            continue;
+        if buffer.is_empty() {
+            if try_set_terminator_directive(trimmed, term)
+                || try_set_immediate_directive(trimmed, term)
+            {
+                continue;
+            }
+            // `set output` / `set json-flavor`: an unknown value is reported
+            // like a parse error, without touching the exit code.
+            let mut options = sink.options();
+            match try_set_output_directive(trimmed, &mut options) {
+                Some(Ok(())) => {
+                    sink.set_options(options);
+                    continue;
+                }
+                Some(Err(message)) => {
+                    report_error(&message);
+                    continue;
+                }
+                None => {}
+            }
         }
         if is_terminator_line(trimmed, term) {
-            if flush(&mut buffer, &mut last_error, session) {
+            if flush(&mut buffer, &mut last_error, session, sink, report_error) {
                 return last_error.unwrap_or(false) as i32;
             }
             continue;
@@ -363,12 +462,12 @@ pub fn run_source_with(
         buffer.push_str(&line);
         if term.immediate
             && statement_complete(&buffer)
-            && flush(&mut buffer, &mut last_error, session)
+            && flush(&mut buffer, &mut last_error, session, sink, report_error)
         {
             return last_error.unwrap_or(false) as i32;
         }
     }
-    flush(&mut buffer, &mut last_error, session);
+    flush(&mut buffer, &mut last_error, session, sink, report_error);
     last_error.unwrap_or(false) as i32
 }
 
@@ -477,5 +576,57 @@ mod tests {
         assert!(!t.immediate);
         assert!(!try_set_immediate_directive("set immediate maybe", &mut t));
         assert!(!try_set_immediate_directive("set terminator go", &mut t));
+    }
+
+    #[test]
+    fn set_output_directive() {
+        let mut o = FormatOptions::default();
+        assert_eq!(try_set_output_directive("select 1", &mut o), None);
+        assert_eq!(try_set_output_directive("set terminator go", &mut o), None);
+        assert_eq!(
+            try_set_output_directive("SET OUTPUT 'CSV'", &mut o),
+            Some(Ok(()))
+        );
+        assert_eq!(o.format, OutputFormat::Csv);
+        assert_eq!(
+            try_set_output_directive("set\tjson-flavor dynamodb", &mut o),
+            Some(Ok(()))
+        );
+        assert_eq!(o.json_flavor, JsonFlavor::Dynamodb);
+        assert_eq!(
+            try_set_output_directive("set output xml", &mut o),
+            Some(Err(
+                "unknown output format: xml (expected default, json, csv, table)\n".into()
+            ))
+        );
+        assert_eq!(
+            try_set_output_directive("set json-flavor typed", &mut o),
+            Some(Err(
+                "unknown JSON flavor: typed (expected plain, dynamodb)\n".into()
+            ))
+        );
+        assert_eq!(o.format, OutputFormat::Csv);
+    }
+
+    #[test]
+    fn retry_line() {
+        let mut e = RetryEvent {
+            operation: "Scan".into(),
+            attempt: 2,
+            max_attempts: 11,
+            error_code: "ProvisionedThroughputExceededException".into(),
+            throttled: true,
+            delay: Some(std::time::Duration::from_millis(150)),
+        };
+        assert_eq!(
+            format_retry_line(&e),
+            "ddbsh: Scan throttled (ProvisionedThroughputExceededException); attempt 2 of 11 in 150 ms\n"
+        );
+        e.operation.clear();
+        e.error_code.clear();
+        e.throttled = false;
+        e.max_attempts = 0;
+        e.delay = None;
+        assert_eq!(format_retry_line(&e), "ddbsh: request failed; attempt 2\n");
     }
 }

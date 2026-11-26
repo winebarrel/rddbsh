@@ -7,6 +7,7 @@
 //! Typed execution outcomes (port of include/ddbsh/exec_outcome.hpp + outcome_sink.hpp).
 
 use crate::client::{ConsumedCapacity, ItemRow, VectorConsumedCapacity};
+use crate::value::ValueMap;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StatusOutcome {
@@ -14,15 +15,33 @@ pub struct StatusOutcome {
     pub diagnostics: Vec<String>,
 }
 
+/// The rows of a report that has natural columns (SHOW TABLES, SHOW BACKUPS,
+/// SHOW LIMITS), for the opt-in output formats (render::format). `columns` is
+/// the complete, ordered column list; a row may omit columns. `group_end` marks
+/// the last row of an API page (the text-table format prints a box there).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportTable {
+    pub columns: Vec<String>,
+    pub rows: Vec<ValueMap>,
+    pub group_end: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ReportOutcome {
     pub lines: Vec<String>,
+    /// The same content as rows, set only by the reports with natural
+    /// columns. The Renderer ignores it.
+    pub table: Option<ReportTable>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SelectOutcome {
     pub items: Vec<ItemRow>,
     pub consumed_capacity: Option<ConsumedCapacity>,
+    /// The columns the output formats show first: for `SELECT *` the base
+    /// table's keys (then the index's), for a projection its top-level
+    /// attributes in order. The Renderer ignores it.
+    pub column_hint: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -79,6 +98,9 @@ pub struct BulkWriteOutcome {
     pub ccf: i64,
     pub consumed_capacity: Option<ConsumedCapacity>,
     pub returned_items: Vec<ItemRow>,
+    /// A streaming fragment that carries RETURN VALUES items only; the final
+    /// (non-partial) fragment carries the accounting line.
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +149,10 @@ impl ExecOutcome {
 /// Receives outcome fragments as they are produced (streaming execution).
 pub trait OutcomeSink {
     fn emit(&mut self, fragment: ExecOutcome);
+    /// The statement is over. Session::execute_streaming calls this exactly
+    /// once, after the last emit, on success and on failure, so a sink holding
+    /// an open result set closes it before the caller prints an error.
+    fn end_statement(&mut self) {}
 }
 
 /// A sink that buffers every fragment.

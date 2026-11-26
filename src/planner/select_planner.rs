@@ -7,7 +7,7 @@
 //! The SELECT GetItem/Query/Scan/SearchVectors decision matrix
 //! (port of planner/select_planner.cpp).
 
-use super::get_key_schema::get_key_schema;
+use super::get_key_schema::{get_key_schema, ResolvedKeySchema};
 use crate::client::*;
 use crate::error::{fail, Errc, Result};
 use crate::expressions::{KeyMap, SymbolTable};
@@ -30,6 +30,32 @@ pub struct SelectPlan {
     pub query: QueryIn,
     pub scan: ScanIn,
     pub search_vectors: SearchVectorsIn,
+    /// The columns the output formats show first (SelectOutcome::column_hint).
+    /// Set for get_item/query/scan; empty for search_vectors.
+    pub column_hint: Vec<String>,
+}
+
+/// For `SELECT *`: the base table's keys, then the index's keys not already
+/// listed. For an explicit projection: the top-level attribute of each path
+/// (`a.b` and `a[0]` both give `a`), in the user's order, without duplicates.
+fn column_hint_of(projection: &[String], keys: &ResolvedKeySchema) -> Vec<String> {
+    let mut hint: Vec<String> = Vec::new();
+    let mut add = |name: &str| {
+        if !name.is_empty() && !hint.iter().any(|h| h == name) {
+            hint.push(name.to_string());
+        }
+    };
+    if projection.is_empty() {
+        for k in keys.table_keys.iter().chain(&keys.pk).chain(&keys.rk) {
+            add(k);
+        }
+    } else {
+        for path in projection {
+            let end = path.find(['.', '[']).unwrap_or(path.len());
+            add(&path[..end]);
+        }
+    }
+    hint
 }
 
 pub fn serialize_projection(projection: &[String], st: &mut SymbolTable) -> String {
@@ -162,7 +188,10 @@ pub fn plan_select(
     let qplan = where_.and_then(|w| w.plan_query(pk, rk));
 
     let mut st = SymbolTable::new(alias_prefix);
-    let mut plan = SelectPlan::default();
+    let mut plan = SelectPlan {
+        column_hint: column_hint_of(&cmd.projection, &resolved),
+        ..Default::default()
+    };
     if can_getitem {
         let w = where_.unwrap();
         plan.api = SelectApi::GetItem;

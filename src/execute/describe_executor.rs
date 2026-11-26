@@ -10,7 +10,9 @@ use crate::client::{
     DescribeTimeToLiveIn, ExplainRequest, TableKeySchema,
 };
 use crate::error::Result;
-use crate::outcome::{ExecOutcome, ExplainBlock, ExplainFormat, ExplainOutcome, ReportOutcome};
+use crate::outcome::{
+    ExecOutcome, ExplainBlock, ExplainFormat, ExplainOutcome, OutcomeSink, ReportOutcome,
+};
 use crate::parser::ast::{
     DescribeCmd, Projection, ProjectionType, ScalarType, SearchSchemaElem, SearchSchemaKind,
     VectorDistance,
@@ -72,7 +74,14 @@ fn projection_text(p: &Projection) -> String {
     }
 }
 
-pub fn execute_describe(cmd: &DescribeCmd, client: &mut dyn DdbClient) -> Result<ExecOutcome> {
+/// Emits the report in up to three fragments, each as soon as the response it
+/// depends on has arrived: basic info through warm throughput, PITR through
+/// SSE, then the replica lines.
+pub fn execute_describe(
+    cmd: &DescribeCmd,
+    client: &mut dyn DdbClient,
+    sink: &mut dyn OutcomeSink,
+) -> Result<()> {
     let td = client.describe_table(&DescribeTableIn {
         table_name: cmd.table.clone(),
     })?;
@@ -80,6 +89,14 @@ pub fn execute_describe(cmd: &DescribeCmd, client: &mut dyn DdbClient) -> Result
         table_name: cmd.table.clone(),
     });
     let mut lines: Vec<String> = Vec::new();
+    let flush = |lines: &mut Vec<String>, sink: &mut dyn OutcomeSink| {
+        if !lines.is_empty() {
+            sink.emit(ExecOutcome::Report(ReportOutcome {
+                lines: std::mem::take(lines),
+                table: None,
+            }));
+        }
+    };
     lines.push(format!("Name: {} ({})", td.table_name, td.table_status));
     lines.push(format!("Key: {}", key_schema_text(&td.key_schema)));
     {
@@ -134,6 +151,7 @@ pub fn execute_describe(cmd: &DescribeCmd, client: &mut dyn DdbClient) -> Result
             wt.read_units_per_second, wt.write_units_per_second, wt.status
         ));
     }
+    flush(&mut lines, sink);
     if let Ok(cb) = client.describe_continuous_backups(&DescribeContinuousBackupsIn {
         table_name: cmd.table.clone(),
     }) {
@@ -234,6 +252,7 @@ pub fn execute_describe(cmd: &DescribeCmd, client: &mut dyn DdbClient) -> Result
         Some(s) => lines.push(format!("SSE: ({})", s)),
         None => lines.push("SSE: Not set".into()),
     }
+    flush(&mut lines, sink);
     if let Ok(scaling) =
         client.describe_table_replica_auto_scaling(&DescribeTableReplicaAutoScalingIn {
             table_name: cmd.table.clone(),
@@ -246,7 +265,8 @@ pub fn execute_describe(cmd: &DescribeCmd, client: &mut dyn DdbClient) -> Result
             ));
         }
     }
-    Ok(ExecOutcome::Report(ReportOutcome { lines }))
+    flush(&mut lines, sink);
+    Ok(())
 }
 
 pub fn execute_describe_explain(

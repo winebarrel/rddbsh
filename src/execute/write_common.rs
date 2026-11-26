@@ -9,7 +9,10 @@
 use crate::client::*;
 use crate::error::Result;
 use crate::expressions::{KeyMap, QueryKeyPlan, SymbolTable, Where};
-use crate::outcome::{ExplainBlock, ExplainFormat};
+use crate::outcome::{
+    BulkVerb, BulkWriteOutcome, ExecOutcome, ExplainBlock, ExplainFormat, ExplainOutcome,
+    OutcomeSink,
+};
 use crate::value::ValueMap;
 
 pub use crate::planner::select_planner::key_of;
@@ -173,4 +176,23 @@ pub fn explain_block(
         body,
         format: ExplainFormat::Pretty,
     })
+}
+
+/// Emit one EXPLAIN block as its own fragment (the streaming bulk writes).
+pub fn emit_explain_block(sink: &mut dyn OutcomeSink, block: ExplainBlock) {
+    sink.emit(ExecOutcome::Explain(ExplainOutcome {
+        blocks: vec![block],
+        trailing_status: None,
+    }));
+}
+
+/// Emit one RETURN VALUES item of a bulk write as a partial BulkWriteOutcome
+/// (renders the item line only; the accounting line follows at the end).
+pub fn emit_returned_item(sink: &mut dyn OutcomeSink, verb: BulkVerb, item: ItemRow) {
+    sink.emit(ExecOutcome::BulkWrite(BulkWriteOutcome {
+        verb,
+        returned_items: vec![item],
+        partial: true,
+        ..Default::default()
+    }));
 }

@@ -14,6 +14,7 @@ use super::datetime::iso8601_to_epoch;
 use super::parse;
 use crate::client::*;
 use crate::error::{fail, Errc, Error, Result};
+use crate::retry::{is_throttling_error, RetryEvent, RetryObserver};
 
 /// Sends one DynamoDB JSON 1.0 request and returns the raw response body.
 ///
@@ -91,6 +92,9 @@ pub struct WireClient<T: Transport> {
     pub max_retry_attempts: u32,
     /// Sleep hook (tests replace it to avoid real sleeping).
     pub backoff_sleep: Box<dyn FnMut(Duration) + Send>,
+    /// Told about each retry, after the backoff is computed and before it is
+    /// slept (`--show-retries`). The waiters' polls are not retries.
+    retry_observer: Option<RetryObserver>,
     rng: u64,
 }
 
@@ -102,6 +106,7 @@ impl<T: Transport> WireClient<T> {
             endpoint: String::new(),
             max_retry_attempts: 11,
             backoff_sleep: Box::new(std::thread::sleep),
+            retry_observer: None,
             rng: seed(),
         }
     }
@@ -128,7 +133,9 @@ impl<T: Transport> WireClient<T> {
         (x >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    fn retry_backoff(&mut self, attempt: u32) {
+    /// The full-jitter backoff for the 0-based attempt: a uniform draw in
+    /// [0, min(1000ms, 50ms * 2^attempt)].
+    fn retry_delay(&mut self, attempt: u32) -> Duration {
         const BASE_MS: u64 = 50;
         const CAP_MS: u64 = 1000;
         let ceiling = if attempt < 20 {
@@ -137,20 +144,34 @@ impl<T: Transport> WireClient<T> {
             CAP_MS
         };
         let ms = (self.jitter_unit() * ceiling as f64) as u64;
-        (self.backoff_sleep)(Duration::from_millis(ms));
+        Duration::from_millis(ms)
     }
 
     fn send_retrying(&mut self, req: &WireRequest) -> Result<String> {
         let mut attempt = 0u32;
         loop {
             let resp = self.transport.send(&req.operation, &req.body)?;
-            let retryable = parse::error_type_name(&resp)
-                .map(|n| is_transient_wire_error(&n))
-                .unwrap_or(false);
-            if !retryable || attempt + 1 >= self.max_retry_attempts {
+            let name = parse::error_type_name(&resp).filter(|n| is_transient_wire_error(n));
+            let Some(name) = name else {
+                return Ok(resp);
+            };
+            if attempt + 1 >= self.max_retry_attempts {
                 return Ok(resp);
             }
-            self.retry_backoff(attempt);
+            // The retry is decided: compute the backoff, tell the observer with
+            // the delay about to be slept, then sleep and re-send.
+            let delay = self.retry_delay(attempt);
+            if let Some(observer) = self.retry_observer.as_mut() {
+                observer(&RetryEvent {
+                    operation: req.operation.clone(),
+                    attempt: attempt + 2,
+                    max_attempts: self.max_retry_attempts,
+                    throttled: is_throttling_error(&name),
+                    error_code: name,
+                    delay: Some(delay),
+                });
+            }
+            (self.backoff_sleep)(delay);
             attempt += 1;
         }
     }
@@ -189,6 +210,9 @@ impl<T: Transport> WireClient<T> {
 }
 
 impl<T: Transport> DdbClient for WireClient<T> {
+    fn set_retry_observer(&mut self, observer: Option<RetryObserver>) {
+        self.retry_observer = observer;
+    }
     fn connect(&mut self, region: &str, endpoint: &str) -> Result<()> {
         self.region = region.to_string();
         self.endpoint = endpoint.to_string();
@@ -301,16 +325,28 @@ impl<T: Transport> DdbClient for WireClient<T> {
     }
     fn list_tables(&mut self, _i: &ListTablesIn) -> Result<ListTablesOut> {
         let mut out = ListTablesOut::default();
-        let mut cursor: Option<String> = None;
+        let mut page_in = ListTablesPageIn::default();
         loop {
-            let req = codec::serialize_list_tables(cursor.as_deref());
-            let page = self.round_trip(req, parse::parse_list_tables)?;
+            let page = self.list_tables_page(&page_in)?;
             out.table_names.extend(page.table_names);
-            cursor = page.last_evaluated_table_name;
-            if cursor.is_none() {
+            page_in.exclusive_start_table_name = page.last_evaluated_table_name;
+            if page_in.exclusive_start_table_name.is_none() {
                 return Ok(out);
             }
         }
+    }
+    fn list_tables_page(&mut self, i: &ListTablesPageIn) -> Result<ListTablesPageOut> {
+        // An empty cursor means the first page; it is not sent.
+        let cursor = i
+            .exclusive_start_table_name
+            .as_deref()
+            .filter(|c| !c.is_empty());
+        let req = codec::serialize_list_tables(cursor);
+        let page = self.round_trip(req, parse::parse_list_tables)?;
+        Ok(ListTablesPageOut {
+            table_names: page.table_names,
+            last_evaluated_table_name: page.last_evaluated_table_name,
+        })
     }
     fn describe_table(&mut self, i: &DescribeTableIn) -> Result<DescribeTableOut> {
         self.round_trip(
@@ -509,6 +545,41 @@ mod tests {
         ]);
         assert!(c.scan(&ScanIn::default()).is_ok());
         assert_eq!(c.transport().calls.len(), 3);
+    }
+
+    #[test]
+    fn retry_observer_sees_each_retry_before_its_sleep() {
+        use std::sync::{Arc, Mutex};
+        let log: Arc<Mutex<Vec<String>>> = Arc::default();
+        let mut c = client(vec![
+            Ok(THROTTLE.into()),
+            Ok(r#"{"__type":"x#InternalServerError","message":"oops"}"#.into()),
+            Ok(r#"{"Items":[]}"#.into()),
+        ]);
+        let l = log.clone();
+        c.backoff_sleep = Box::new(move |d| l.lock().unwrap().push(format!("sleep {:?}", d)));
+        let l = log.clone();
+        c.set_retry_observer(Some(Box::new(move |e: &RetryEvent| {
+            l.lock().unwrap().push(format!(
+                "{} {} {}/{} {} {:?}",
+                e.operation, e.error_code, e.attempt, e.max_attempts, e.throttled, e.delay
+            ))
+        })));
+        assert!(c.scan(&ScanIn::default()).is_ok());
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 4);
+        assert!(log[0].starts_with("Scan ThrottlingException 2/11 true Some("));
+        assert!(log[1].starts_with("sleep "));
+        assert!(log[2].starts_with("Scan InternalServerError 3/11 false Some("));
+        // The reported delay is the slept delay.
+        let delay = |s: &str| {
+            s.rsplit("Some(")
+                .next()
+                .unwrap()
+                .trim_end_matches(')')
+                .to_string()
+        };
+        assert_eq!(delay(&log[0]), log[1].trim_start_matches("sleep "));
     }
 
     #[test]

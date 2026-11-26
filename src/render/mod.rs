@@ -5,6 +5,8 @@
 // Copyright Amazon.com, Inc. or its affiliates.
 
 //! Output + EXPLAIN formatting (port of src/render/renderer.cpp).
+pub mod format;
+
 use crate::client::{ConsumedCapacity, ItemRow};
 use crate::error::Error;
 use crate::outcome::*;
@@ -85,7 +87,7 @@ fn render_consumed_capacity(cc: &ConsumedCapacity) -> String {
     )
 }
 
-fn format_score(score: f64) -> String {
+pub(crate) fn format_score(score: f64) -> String {
     let s = to_string_f64(score);
     match s.strip_prefix('-') {
         Some(rest) => format!("-{}", trim_double(rest)),
@@ -148,6 +150,11 @@ fn render_bulk_write(b: &BulkWriteOutcome) -> String {
     for item in &b.returned_items {
         out += &show_item(item);
         out.push('\n');
+    }
+    if b.partial {
+        // A streaming RETURN VALUES fragment: items only; the accounting line
+        // comes with the final fragment.
+        return out;
     }
     let verb = match b.verb {
         BulkVerb::Update => "UPDATE",
@@ -314,6 +321,7 @@ mod tests {
                 read_capacity_units: None,
                 write_capacity_units: Some(2.0),
             }),
+            column_hint: vec![],
         });
         assert_eq!(Renderer.render(&o), "{a: 1}\nSELECT (t, 0.5, 0, 2)\n");
     }

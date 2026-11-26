@@ -20,14 +20,19 @@ use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::{Context, Editor, Helper};
 
-use rddbsh::cli::{resolve_ca_bundle, run_source, LineSource, StreamLineSource, Terminator};
+use rddbsh::cli::{
+    resolve_ca_bundle, run_source, unknown_json_flavor_message, unknown_output_format_message,
+    write_retry_line, LineSource, StreamLineSource, Terminator,
+};
 use rddbsh::client::{DdbClient, ListTablesIn};
 use rddbsh::completion;
+use rddbsh::render::format::{FormatOptions, JsonFlavor, OutputFormat};
 use rddbsh::render::Renderer;
 use rddbsh::session::{ConnectionHint, Session, SessionConfig};
 
-const USAGE: &str =
-    "Usage: ddbsh [-q] [-e] [-d] [-t[TERM]] [--immediate] [--ca-bundle <file>] [-c \"<cmds>\" | -f <file>]\n";
+const USAGE: &str = "Usage: ddbsh [-q] [-e] [-d] [-t[TERM]] [--immediate] [--ca-bundle <file>] \
+     [--show-retries] [--output default|json|csv|table] [--json-flavor plain|dynamodb] \
+     [-c \"<cmds>\" | -f <file>]\n";
 
 fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
@@ -41,6 +46,9 @@ struct Options {
     cmdstring: Option<String>,
     inputfile: Option<String>,
     ca_bundle: Option<String>,
+    show_retries: bool,
+    output: Option<OutputFormat>,
+    json_flavor: Option<JsonFlavor>,
     term: Terminator,
 }
 
@@ -57,8 +65,9 @@ fn set_terminator(term: &mut Terminator, arg: Option<&str>) {
     }
 }
 
-/// getopt_long-compatible parsing of "qc:f:edt::" plus --terminator[=STR]
-/// and --ca-bundle <file>. Non-option arguments are ignored (GNU permutes
+/// getopt_long-compatible parsing of "qc:f:edt::" plus --terminator[=STR],
+/// --immediate, --ca-bundle <file>, --show-retries, --output <format> and
+/// --json-flavor <flavor>. Non-option arguments are ignored (GNU permutes
 /// them to the end; the original never reads them).
 fn parse_args(prog: &str, args: &[String]) -> Result<Options, ()> {
     let mut o = Options::default();
@@ -74,10 +83,17 @@ fn parse_args(prog: &str, args: &[String]) -> Result<Options, ()> {
                 Some((n, v)) => (n, Some(v.to_string())),
                 None => (long, None),
             };
-            let candidates: Vec<&str> = ["terminator", "immediate", "ca-bundle"]
-                .into_iter()
-                .filter(|c| !name.is_empty() && c.starts_with(name))
-                .collect();
+            let candidates: Vec<&str> = [
+                "terminator",
+                "immediate",
+                "ca-bundle",
+                "show-retries",
+                "output",
+                "json-flavor",
+            ]
+            .into_iter()
+            .filter(|c| !name.is_empty() && c.starts_with(name))
+            .collect();
             let full = match candidates.as_slice() {
                 [one] => *one,
                 [] => {
@@ -91,12 +107,16 @@ fn parse_args(prog: &str, args: &[String]) -> Result<Options, ()> {
             };
             if full == "terminator" {
                 set_terminator(&mut o.term, value.as_deref());
-            } else if full == "immediate" {
+            } else if full == "immediate" || full == "show-retries" {
                 if value.is_some() {
-                    eprintln!("{}: option '--immediate' doesn't allow an argument", prog);
+                    eprintln!("{}: option '--{}' doesn't allow an argument", prog, full);
                     return Err(());
                 }
-                o.term.immediate = true;
+                if full == "immediate" {
+                    o.term.immediate = true;
+                } else {
+                    o.show_retries = true;
+                }
             } else {
                 let v = match value {
                     Some(v) => v,
@@ -105,11 +125,27 @@ fn parse_args(prog: &str, args: &[String]) -> Result<Options, ()> {
                         args[i - 1].clone()
                     }
                     None => {
-                        eprintln!("{}: option '--ca-bundle' requires an argument", prog);
+                        eprintln!("{}: option '--{}' requires an argument", prog, full);
                         return Err(());
                     }
                 };
-                o.ca_bundle = Some(v);
+                match full {
+                    "output" => match OutputFormat::parse(&v) {
+                        Some(f) => o.output = Some(f),
+                        None => {
+                            eprint!("ddbsh: {}", unknown_output_format_message(&v));
+                            return Err(());
+                        }
+                    },
+                    "json-flavor" => match JsonFlavor::parse(&v) {
+                        Some(f) => o.json_flavor = Some(f),
+                        None => {
+                            eprint!("ddbsh: {}", unknown_json_flavor_message(&v));
+                            return Err(());
+                        }
+                    },
+                    _ => o.ca_bundle = Some(v),
+                }
             }
             continue;
         }
@@ -346,13 +382,17 @@ fn real_main() -> i32 {
     );
 
     let completion_ca_bundle = ca_bundle.clone();
-    let client = match open_client(&region, &endpoint, ca_bundle) {
+    let mut client = match open_client(&region, &endpoint, ca_bundle) {
         Ok(c) => c,
         Err(msg) => {
             eprintln!("{}", msg);
             return 1;
         }
     };
+    // --show-retries: one stderr line per retry, before its backoff.
+    if opts.show_retries {
+        client.set_retry_observer(Some(Box::new(write_retry_line)));
+    }
     let mut session = Session::new(
         SessionConfig {
             region: region.clone(),
@@ -363,18 +403,34 @@ fn real_main() -> i32 {
     let renderer = Renderer;
 
     // Config file: abort-on-error so a bad line stops startup; a QUIT there
-    // ends config processing only.
+    // ends config processing only. A `set output` / `set json-flavor` there
+    // applies first; the flags override it, and a later directive both.
+    let mut format = FormatOptions::default();
     if let Some(cfg) = config_path() {
         if let Ok(f) = File::open(&cfg) {
             let mut cfg_term = Terminator::default();
             let mut src = StreamLineSource::new(BufReader::new(f));
-            let rv = run_source(&mut session, &renderer, &mut src, &mut cfg_term, true);
+            let rv = run_source(
+                &mut session,
+                &renderer,
+                &mut src,
+                &mut cfg_term,
+                true,
+                &mut format,
+            );
             // `set immediate on` in the config file turns the mode on for the session.
             opts.term.immediate |= cfg_term.immediate;
             if rv != 0 {
                 return 1;
             }
         }
+    }
+
+    if let Some(f) = opts.output {
+        format.format = f;
+    }
+    if let Some(f) = opts.json_flavor {
+        format.json_flavor = f;
     }
 
     if !opts.quiet {
@@ -390,6 +446,7 @@ fn real_main() -> i32 {
             &mut src,
             &mut opts.term,
             opts.abort_on_error,
+            &mut format,
         );
     }
 
@@ -408,6 +465,7 @@ fn real_main() -> i32 {
             &mut src,
             &mut opts.term,
             opts.abort_on_error,
+            &mut format,
         );
     }
 
@@ -439,6 +497,7 @@ fn real_main() -> i32 {
         &mut src,
         &mut opts.term,
         opts.abort_on_error,
+        &mut format,
     );
     if let Some(h) = &history {
         let _ = src.editor.save_history(h);
