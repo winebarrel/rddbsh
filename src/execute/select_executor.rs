@@ -59,12 +59,22 @@ pub fn execute_select_explain(
         ),
     };
     let body = client.explain_request(&request)?;
-    Ok(ExecOutcome::Explain(ExplainOutcome {
-        blocks: vec![ExplainBlock {
-            api_name: api_name.to_string(),
+    let mut blocks = vec![ExplainBlock {
+        api_name: api_name.to_string(),
+        body,
+        format: ExplainFormat::Pretty,
+    }];
+    // A not-equal split prints its second Query after the first.
+    if let Some(upper) = plan.query_upper {
+        let body = client.explain_request(&ExplainRequest::Query(upper))?;
+        blocks.push(ExplainBlock {
+            api_name: "Query".to_string(),
             body,
             format: ExplainFormat::Pretty,
-        }],
+        });
+    }
+    Ok(ExecOutcome::Explain(ExplainOutcome {
+        blocks,
         trailing_status: None,
     }))
 }

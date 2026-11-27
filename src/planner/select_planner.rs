@@ -10,7 +10,7 @@
 use super::get_key_schema::{get_key_schema, ResolvedKeySchema};
 use crate::client::*;
 use crate::error::{fail, Errc, Result};
-use crate::expressions::{KeyMap, SymbolTable};
+use crate::expressions::{KeyMap, NeLeg, SymbolTable};
 use crate::parser::ast::SelectCmd;
 use crate::value::{Value, ValueMap};
 
@@ -28,6 +28,9 @@ pub struct SelectPlan {
     pub api: SelectApi,
     pub get_item: GetItemIn,
     pub query: QueryIn,
+    /// The upper leg of a not-equal split: set when `query` is the lower leg
+    /// (`#sk < :v`) and this Query (`#sk > :v`) runs after it.
+    pub query_upper: Option<QueryIn>,
     pub scan: ScanIn,
     pub search_vectors: SearchVectorsIn,
     /// The columns the output formats show first (SelectOutcome::column_hint).
@@ -185,7 +188,7 @@ pub fn plan_select(
     let has_index = cmd.index.is_some();
     let where_ = cmd.where_.as_ref();
     let can_getitem = !has_index && where_.map(|w| w.can_getitem(pk, rk)).unwrap_or(false);
-    let qplan = where_.and_then(|w| w.plan_query(pk, rk));
+    let qplan = where_.and_then(|w| w.plan_query(pk, rk, Some(&resolved.key_types)));
 
     let mut st = SymbolTable::new(alias_prefix);
     let mut plan = SelectPlan {
@@ -214,23 +217,35 @@ pub fn plan_select(
     if let Some(qp) = qplan {
         let w = where_.unwrap();
         plan.api = SelectApi::Query;
-        let r = &mut plan.query;
-        r.table_name = cmd.table.clone();
-        if has_index {
-            r.index_name = cmd.index.clone();
+        // A not-equal split renders each leg from its own copy of the fresh
+        // symbol table, in the same order, so both legs carry the same tokens
+        // and differ only in `<` / `>`.
+        let fresh = st.clone();
+        let build = |leg_st: &mut SymbolTable, leg: NeLeg| {
+            let mut r = QueryIn {
+                table_name: cmd.table.clone(),
+                index_name: if has_index { cmd.index.clone() } else { None },
+                consistent_read: cmd.consistent,
+                return_consumed_capacity: rcc,
+                ..Default::default()
+            };
+            if !cmd.projection.is_empty() {
+                r.projection_expression = Some(serialize_projection(&cmd.projection, leg_st));
+            }
+            r.key_condition_expression = w.query_key_condition_expression(&qp, Some(leg_st), leg);
+            let filter = w.query_filter_expression(&qp, Some(leg_st));
+            if !filter.is_empty() {
+                r.filter_expression = Some(filter);
+            }
+            r.expression_attribute_names = leg_st.names_vec();
+            r.expression_attribute_values = leg_st.values_vec();
+            r
+        };
+        plan.query = build(&mut st, NeLeg::Lower);
+        if qp.ne_split.is_some() {
+            let mut upper_st = fresh;
+            plan.query_upper = Some(build(&mut upper_st, NeLeg::Upper));
         }
-        r.consistent_read = cmd.consistent;
-        r.return_consumed_capacity = rcc;
-        if !cmd.projection.is_empty() {
-            r.projection_expression = Some(serialize_projection(&cmd.projection, &mut st));
-        }
-        r.key_condition_expression = w.query_key_condition_expression(&qp, Some(&mut st));
-        let filter = w.query_filter_expression(&qp, Some(&mut st));
-        if !filter.is_empty() {
-            r.filter_expression = Some(filter);
-        }
-        r.expression_attribute_names = st.names_vec();
-        r.expression_attribute_values = st.values_vec();
         return Ok(plan);
     }
     plan.api = SelectApi::Scan;

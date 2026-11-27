@@ -8,6 +8,14 @@
 //!
 //! Each node carries `negate` (rendered as `NOT (...)`) and `parens`
 //! (an explicit parenthesized group, which blocks AND/OR flattening).
+//!
+//! `<>` and `!=` are one operator. A comparison keeps the typed spelling for
+//! rendering where it is legal (a filter or condition: `#a <> :v` for `<>`,
+//! `NOT (#a = :v)` for `!=`), but every planner probe asks what the node
+//! means (`means_equal` / `means_not_equal`), so the two spellings plan
+//! identically. A not-equal on the sort key that the planner splits
+//! (`KeySchemaView::ne_split`) renders `#sk < :v` on the lower leg and
+//! `#sk > :v` on the upper leg.
 
 use std::collections::BTreeMap;
 
@@ -17,10 +25,36 @@ use crate::value::Value;
 
 pub type KeyMap = BTreeMap<String, Value>;
 
+/// Which side of the value a not-equal split renders: `Lower` renders
+/// `#sk < :v`, `Upper` renders `#sk > :v`. `None` when there is no split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NeLeg {
+    #[default]
+    None,
+    Lower,
+    Upper,
+}
+
+/// The key attributes a Query is planned against. `ne_split` names the sort
+/// key attribute of a not-equal split (the Query is issued twice, once for
+/// each side of the value); `leg` says which side this rendering is for.
 #[derive(Debug, Clone, Copy)]
 pub struct KeySchemaView<'a> {
     pub pk: &'a [String],
     pub sk: &'a [String],
+    pub ne_split: Option<&'a str>,
+    pub leg: NeLeg,
+}
+
+impl<'a> KeySchemaView<'a> {
+    pub fn new(pk: &'a [String], sk: &'a [String]) -> KeySchemaView<'a> {
+        KeySchemaView {
+            pk,
+            sk,
+            ne_split: None,
+            leg: NeLeg::None,
+        }
+    }
 }
 
 fn key_contains(list: &[String], name: &str) -> bool {
@@ -202,6 +236,36 @@ impl LogicalExpr {
         Self::leaf(LogicalKind::Or(vec![e1, e2]))
     }
 
+    /// `lhs = rhs` in meaning: `=`, or a negated `<>` (`NOT x <> v`).
+    /// False for anything but a comparison.
+    pub fn means_equal(&self) -> bool {
+        match &self.kind {
+            LogicalKind::Comparison { op, .. } => {
+                (op == "=" && !self.negate) || (op == "<>" && self.negate)
+            }
+            _ => false,
+        }
+    }
+
+    /// `lhs <> rhs` in meaning: `<>`, `!=` (a negated `=`) or `NOT x = v`.
+    /// False for anything but a comparison.
+    pub fn means_not_equal(&self) -> bool {
+        match &self.kind {
+            LogicalKind::Comparison { op, .. } => {
+                (op == "=" && self.negate) || (op == "<>" && !self.negate)
+            }
+            _ => false,
+        }
+    }
+
+    /// This node is the not-equal the view splits on.
+    fn is_split(&self, ks: KeySchemaView) -> bool {
+        match (&self.kind, ks.ne_split) {
+            (LogicalKind::Comparison { lhs, .. }, Some(s)) => lhs == s && self.means_not_equal(),
+            _ => false,
+        }
+    }
+
     fn lhs(&self) -> Option<&str> {
         match &self.kind {
             LogicalKind::And(_) | LogicalKind::Or(_) => None,
@@ -234,10 +298,27 @@ impl LogicalExpr {
     pub fn count_gud_key(&self, name: &str) -> i32 {
         match &self.kind {
             LogicalKind::And(l) => l.iter().map(|c| c.count_gud_key(name)).sum(),
-            LogicalKind::Comparison { lhs, op, .. } => {
-                (lhs == name && !self.negate && op == "=") as i32
-            }
+            LogicalKind::Comparison { lhs, .. } => (lhs == name && self.means_equal()) as i32,
             _ => 0,
+        }
+    }
+
+    /// The right-hand value of a not-equal on `name` (`name <> v`,
+    /// `name != v`, `NOT name = v`) that is a conjunct of the top-level,
+    /// non-negated AND chain. A not-equal under OR or a negated AND is never
+    /// found. The planner uses it to split a Query on a sort-key not-equal.
+    pub fn ne_key_value(&self, name: &str) -> Option<&Value> {
+        match &self.kind {
+            LogicalKind::And(l) => {
+                if self.negate {
+                    return None;
+                }
+                l.iter().find_map(|c| c.ne_key_value(name))
+            }
+            LogicalKind::Comparison { lhs, rhs, .. } if lhs == name && self.means_not_equal() => {
+                Some(rhs)
+            }
+            _ => None,
         }
     }
 
@@ -382,11 +463,28 @@ impl LogicalExpr {
 
     pub fn query_key_condition_expression(&self, ks: KeySchemaView, st: &mut St) -> String {
         let rv = self.do_query_kce(ks, st);
-        if rv.is_empty() {
+        if rv.is_empty() || !self.negate_in_key_condition() {
             rv
         } else {
-            self.wrap_negate(rv)
+            format!("NOT ({})", rv)
         }
+    }
+
+    /// Whether the key condition wraps this node in `NOT (...)`. A negated `=`
+    /// reaches the key condition only as a split leg, and a negated `<>` only
+    /// as an equality; both render without the wrapper.
+    fn negate_in_key_condition(&self) -> bool {
+        match &self.kind {
+            LogicalKind::Comparison { op, .. } => self.negate && op != "=" && op != "<>",
+            _ => self.negate,
+        }
+    }
+
+    /// `lhs <op> rhs` with the given operator (aliases minted as do_serialize).
+    fn render_comparison(lhs: &str, op: &str, rhs: &Value, st: &mut St) -> String {
+        let l = attr(st, lhs);
+        let r = val(st, rhs);
+        format!("{} {} {}", l, op, r)
     }
 
     fn do_query_kce(&self, ks: KeySchemaView, st: &mut St) -> String {
@@ -395,12 +493,21 @@ impl LogicalExpr {
                 self.join_children(l, " AND ", |c| c.query_key_condition_expression(ks, st))
             }
             LogicalKind::Or(_) => String::new(),
-            LogicalKind::Comparison { lhs, .. } => {
-                if key_contains(ks.pk, lhs) || key_contains(ks.sk, lhs) {
-                    self.do_serialize(st)
-                } else {
-                    String::new()
+            LogicalKind::Comparison { lhs, op, rhs } => {
+                if !key_contains(ks.pk, lhs) && !key_contains(ks.sk, lhs) {
+                    return String::new();
                 }
+                if self.is_split(ks) {
+                    // One leg of a not-equal split: the range below, or above, the value.
+                    let leg_op = if ks.leg == NeLeg::Upper { ">" } else { "<" };
+                    return Self::render_comparison(lhs, leg_op, rhs, st);
+                }
+                if op == "<>" {
+                    // Reached only for a query-safe `<>` on a key, which is a
+                    // negated one (`NOT x <> v`, i.e. equality).
+                    return Self::render_comparison(lhs, "=", rhs, st);
+                }
+                self.do_serialize(st)
             }
             LogicalKind::Between { lhs, .. } | LogicalKind::BeginsWith { lhs, .. } => {
                 if key_contains(ks.sk, lhs) && !self.negate {
@@ -475,7 +582,15 @@ impl LogicalExpr {
                 if !top {
                     return self.do_serialize(st);
                 }
-                if (lhs == pk || lhs == rk) && !self.negate {
+                // A plain key comparison (a non-negated operator other than
+                // `<>`, or a negated `<>`, which means `=`) is carried as the
+                // item key, so it is not repeated in the condition. A
+                // not-equal on a key, in either spelling, is kept.
+                let plain_key_comparison = match &self.kind {
+                    LogicalKind::Comparison { op, .. } if op == "<>" => self.negate,
+                    _ => !self.negate,
+                };
+                if (lhs == pk || lhs == rk) && plain_key_comparison {
                     return String::new();
                 }
                 self.do_serialize(st)
@@ -495,14 +610,20 @@ impl LogicalExpr {
                 }
                 l.iter().all(|c| c.query_safe(ks))
             }
-            LogicalKind::Comparison { lhs, op, .. } => {
+            LogicalKind::Comparison { lhs, .. } => {
                 if !key_contains(ks.pk, lhs) && !key_contains(ks.sk, lhs) {
                     return true;
                 }
                 if key_contains(ks.pk, lhs) {
-                    return op == "=" && !self.negate;
+                    // A partition-key predicate is query-legal only as an equality.
+                    return self.means_equal();
                 }
-                !(op == "=" && self.negate)
+                // A sort-key not-equal (either spelling) is legal only as the
+                // attribute the planner splits on.
+                if self.means_not_equal() {
+                    return self.is_split(ks);
+                }
+                true
             }
             LogicalKind::Between { lhs, .. } | LogicalKind::BeginsWith { lhs, .. } => {
                 if !key_contains(ks.pk, lhs) && !key_contains(ks.sk, lhs) {

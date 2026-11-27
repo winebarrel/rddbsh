@@ -99,14 +99,14 @@ pub fn execute_delete(
     }
 
     let qplan: Option<QueryKeyPlan> = match &cmd.index {
-        None => where_.and_then(|w| w.plan_query(&base.pk, &base.rk)),
+        None => where_.and_then(|w| w.plan_query(&base.pk, &base.rk, Some(&base.key_types))),
         Some(index) => {
             let idx = get_key_schema(client, &cmd.table, index)?;
-            where_.and_then(|w| w.plan_query(&idx.pk, &idx.rk))
+            where_.and_then(|w| w.plan_query(&idx.pk, &idx.rk, Some(&idx.key_types)))
         }
     };
     let mut read_st = SymbolTable::new(prefix_gen());
-    let read = build_write_read(
+    let mut read = build_write_read(
         &cmd.table,
         &cmd.index,
         where_,
@@ -124,6 +124,12 @@ pub fn execute_delete(
         let (api, req) = read_explain_request(&read, &None);
         emit_explain_block(sink, explain_block(client, api, &req)?);
         if read.api == WriteReadApi::Query {
+            // A not-equal split runs two Queries, so EXPLAIN prints both
+            // Query blocks, lower leg first, and still no DeleteItem blocks.
+            if let Some(upper) = &read.query_upper {
+                let req = ExplainRequest::Query(upper.clone());
+                emit_explain_block(sink, explain_block(client, "Query", &req)?);
+            }
             return Ok(());
         }
     }
@@ -171,13 +177,15 @@ pub fn execute_delete(
             sink.emit(ExecOutcome::Explain(page_writes));
         }
         match page.last_key {
-            Some(k) if !k.is_empty() => {
-                start_key = Some(k);
-                if let Some(l) = &mut limiter {
-                    l.readlimit();
-                }
-            }
+            Some(k) if !k.is_empty() => start_key = Some(k),
+            // The lower leg of a not-equal split is exhausted: enumerate the
+            // upper leg from its first page, metered like a next page. The
+            // counts and EXPLAIN blocks continue across legs.
+            _ if read.next_leg() => start_key = None,
             _ => break,
+        }
+        if let Some(l) = &mut limiter {
+            l.readlimit();
         }
     }
     if !explain {

@@ -37,7 +37,7 @@ DEFAULT_FAMILIES = [
     "basic", "create-drop", "pitr", "symbol-table", "select", "update", "delete",
     "insert-replace", "composite-gsi", "vector", "vector-filters", "transactions",
     "return-values", "test-cleanup", "cross-account", "help", "explain", "show",
-    "formats", "contains", "statement-end", "global-tables", "test-cleanup-last",
+    "formats", "contains", "not-equal", "statement-end", "global-tables", "test-cleanup-last",
 ]
 
 CMAKE_TRUE = {"1", "ON", "YES", "TRUE", "Y"}
