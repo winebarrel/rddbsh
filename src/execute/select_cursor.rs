@@ -18,6 +18,10 @@ pub struct SelectRowCursor {
     api: SelectApi,
     get_item: GetItemIn,
     query: QueryIn,
+    /// The upper leg of a not-equal split: issued, from its first page, once
+    /// `query` is exhausted, and only if the caller asks for the next page
+    /// then. Unset otherwise, and once it has started.
+    query_upper: Option<QueryIn>,
     scan: ScanIn,
     limiter: Option<RateLimiter>,
     totalizer: ConsumedCapacityTotalizer,
@@ -50,6 +54,7 @@ pub fn open_select_cursor(
         api: plan.api,
         get_item: plan.get_item,
         query: plan.query,
+        query_upper: plan.query_upper,
         scan: plan.scan,
         limiter,
         totalizer: ConsumedCapacityTotalizer::default(),
@@ -113,7 +118,17 @@ impl SelectRowCursor {
                         }
                         self.throttle_pending = self.limiter.is_some();
                     }
-                    _ => self.more = false,
+                    _ => {
+                        if let Some(upper) = self.query_upper.take() {
+                            // The lower leg of a not-equal split is exhausted:
+                            // the next fetch starts the upper leg from its
+                            // first page, metered like any next page.
+                            self.query = upper;
+                            self.throttle_pending = self.limiter.is_some();
+                        } else {
+                            self.more = false;
+                        }
+                    }
                 }
             }
             if !items.is_empty() {

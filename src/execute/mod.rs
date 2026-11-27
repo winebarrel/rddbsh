@@ -33,3 +33,7 @@ pub mod write_common;
 // DDL executor unit tests (ddl agent).
 #[cfg(test)]
 mod ddl_tests;
+
+// Sort-key not-equal split unit tests.
+#[cfg(test)]
+mod not_equal_tests;

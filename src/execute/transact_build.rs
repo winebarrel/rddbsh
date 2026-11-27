@@ -142,6 +142,7 @@ pub fn build_transact_condition_check(
     let plan = QueryKeyPlan {
         pk: schema.pk.clone(),
         sk_prefix: schema.rk.clone(),
+        ne_split: None,
     };
     let mut filter = where_.query_filter_expression(&plan, Some(&mut st));
     if !filter.is_empty() {

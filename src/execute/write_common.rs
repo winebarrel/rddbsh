@@ -8,7 +8,7 @@
 
 use crate::client::*;
 use crate::error::Result;
-use crate::expressions::{KeyMap, QueryKeyPlan, SymbolTable, Where};
+use crate::expressions::{KeyMap, NeLeg, QueryKeyPlan, SymbolTable, Where};
 use crate::outcome::{
     BulkVerb, BulkWriteOutcome, ExecOutcome, ExplainBlock, ExplainFormat, ExplainOutcome,
     OutcomeSink,
@@ -27,7 +27,27 @@ pub enum WriteReadApi {
 pub struct WriteReadPlan {
     pub api: WriteReadApi,
     pub query: QueryIn,
+    /// The upper leg of a not-equal split: enumerated after `query` (the
+    /// lower leg) is exhausted. Unset otherwise.
+    pub query_upper: Option<QueryIn>,
     pub scan: ScanIn,
+}
+
+impl WriteReadPlan {
+    /// Move on to the upper leg of a not-equal split once the current read
+    /// is exhausted. False when there is no further leg.
+    pub fn next_leg(&mut self) -> bool {
+        if self.api != WriteReadApi::Query {
+            return false;
+        }
+        match self.query_upper.take() {
+            Some(upper) => {
+                self.query = upper;
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// The base-table key of a read row (attributes sorted by name, first wins).
@@ -65,24 +85,36 @@ pub fn build_write_read(
         ReturnConsumedCapacity::None
     };
     if let (Some(qp), Some(w)) = (qplan, where_) {
-        let mut r = QueryIn {
-            table_name: table.to_string(),
-            index_name: index.clone(),
-            consistent_read: false,
-            return_consumed_capacity: rcc,
-            ..Default::default()
+        // A not-equal split renders its upper leg from a copy of the table as
+        // it is now, so both legs carry the same tokens (as the SELECT planner).
+        let fresh = st.clone();
+        let build = |leg_st: &mut SymbolTable, leg: NeLeg| {
+            let mut r = QueryIn {
+                table_name: table.to_string(),
+                index_name: index.clone(),
+                consistent_read: false,
+                return_consumed_capacity: rcc,
+                ..Default::default()
+            };
+            r.projection_expression = Some(project_base_keys(base_pk, base_rk, leg_st));
+            r.key_condition_expression = w.query_key_condition_expression(qp, Some(leg_st), leg);
+            let filter = w.query_filter_expression(qp, Some(leg_st));
+            if !filter.is_empty() {
+                r.filter_expression = Some(filter);
+            }
+            r.expression_attribute_names = leg_st.names_vec();
+            r.expression_attribute_values = leg_st.values_vec();
+            r
         };
-        r.projection_expression = Some(project_base_keys(base_pk, base_rk, st));
-        r.key_condition_expression = w.query_key_condition_expression(qp, Some(st));
-        let filter = w.query_filter_expression(qp, Some(st));
-        if !filter.is_empty() {
-            r.filter_expression = Some(filter);
-        }
-        r.expression_attribute_names = st.names_vec();
-        r.expression_attribute_values = st.values_vec();
+        let query = build(st, NeLeg::Lower);
+        let query_upper = qp.ne_split.as_ref().map(|_| {
+            let mut upper_st = fresh;
+            build(&mut upper_st, NeLeg::Upper)
+        });
         return WriteReadPlan {
             api: WriteReadApi::Query,
-            query: r,
+            query,
+            query_upper,
             scan: ScanIn::default(),
         };
     }
@@ -105,6 +137,7 @@ pub fn build_write_read(
     WriteReadPlan {
         api: WriteReadApi::Scan,
         query: QueryIn::default(),
+        query_upper: None,
         scan: r,
     }
 }

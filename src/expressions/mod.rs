@@ -11,9 +11,9 @@ pub mod symbol_table;
 pub mod where_clause;
 
 pub use attribute_serialize::serialize_attribute;
-pub use logical::{KeyMap, KeySchemaView, LogicalExpr, LogicalKind};
+pub use logical::{KeyMap, KeySchemaView, LogicalExpr, LogicalKind, NeLeg};
 pub use symbol_table::SymbolTable;
-pub use where_clause::{QueryKeyPlan, Where};
+pub use where_clause::{KeyTypes, QueryKeyPlan, Where};
 
 const PREFIX_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const PREFIX_LENGTH: usize = 3;
